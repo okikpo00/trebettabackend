@@ -47,13 +47,14 @@ const app = express();
 
 // CORS config
 const allowedOrigins = [
-  process.env.FRONTEND2_URL || 
-  'http://localhost:5174',
-  'http://localhost:5173',
-  process.env.ADMIN_URL || 
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://localhost:5175'
+  "https://trebetta.com",
+  "https://www.trebetta.com",
+  "https://admin.trebetta.com",
+
+  // Local development
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://localhost:5175"
 ]
 
 // raw body saver (for webhook signature verification)
@@ -83,9 +84,8 @@ app.use(cookieParser());
 app.use(
   cors({
     origin: function (origin, callback) {
-      // allow requests with no origin (mobile/native or curl/postman)
       if (!origin) return callback(null, true);
-      if (allowedOrigins.indexOf(origin) !== -1) {
+      if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
       return callback(new Error('CORS not allowed'));
