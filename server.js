@@ -13,6 +13,13 @@ const pool = require('./config/db');
 const { startCron } = require('./jobs/poolCronJobs');
 startCron();
 
+const { runManualDepositMatcher } = require('./services/manualDepositMatcher');
+
+setInterval(() => {
+  runManualDepositMatcher();
+}, 5000); // every 5 seconds
+
+
 const authRoutes = require('./routes/authRoutes');
 const adminAuthRoutes = require('./routes/adminAuthRoutes');
 const userRoutes = require('./routes/userRoutes');
@@ -42,6 +49,9 @@ const adminSettingRoutes = require('./routes/adminSettingRoutes');
 const adminProfileRoutes = require('./routes/adminProfileRoutes');
 const adminSessionRoutes = require('./routes/adminSessionRoutes');
 const { adminApiLimiter } = require('./middleware/rateLimiter');
+const bankAlertRoutes = require('./routes/bankAlertRoutes');
+const adminDepositMatchRoutes = require('./routes/adminDepositMatchRoutes');
+const publicRoutes = require('./routes/publicRoutes');
 
 const app = express();
 
@@ -146,6 +156,11 @@ app.use('/api/slip', slipRoutes);
 app.use('/api/admin/sessions', adminSessionRoutes);
 app.use('/api/admin', adminProfileRoutes);
 app.use('/api/admin/settings', adminSettingRoutes);
+app.use('/api/internal/bank', bankAlertRoutes);
+app.use('/api/admin/deposits', adminDepositMatchRoutes);
+
+app.use('/api/public', publicRoutes);
+
 app.use('/api/admin', adminApiLimiter);
 
 

@@ -2,38 +2,61 @@
 const pool = require('../config/db');
 const generateReference = require('../utils/generateReference');
 const { auditLog } = require('../utils/auditLog');
-
-// OLD: const { MIN_DEPOSIT } = require('../utils/limits');
-// NEW: dynamic system settings
 const { getSystemSetting } = require('../services/settingsService');
 
-const { createFlutterwaveTransfer } = require('../services/flutterwaveBankService');
-const { createPaystackTransfer } = require('../services/paystackBankService');
+// STATIC BANK DETAILS FOR MANUAL DEPOSIT
+// ⚠️ Make sure these match your Sterling business account exactly
+const TREBETTA_BANK = {
+  bank_name: 'STERLING BANK',
+  account_name: 'HORIZON BLUE BLISS GLOBAL',
+  account_number: '0116012103' // e.g. '00612340089'
+};
 
+// How long a pending deposit stays valid (in minutes)
+const PENDING_EXPIRES_MIN = 15;
 
 // ---------------------------------------------------------
-// INITIATE WALLET DEPOSIT
+// INITIATE WALLET DEPOSIT  (MANUAL / SEMI-AUTO VERSION)
 // ---------------------------------------------------------
 async function initiateDeposit(req, res) {
   const userId = req.user.id;
-  const { amount } = req.body;
+  const { amount, sender_name, sender_bank } = req.body || {};
 
-  console.log(
-    'depositController.initiateDeposit › user:',
+  console.log('depositController.initiateDeposit ›', {
     userId,
-    'amount:',
-    amount
-  );
+    amount,
+    sender_name,
+    sender_bank
+  });
 
   try {
     const parsedAmount = Number(amount);
+
+    // basic amount validation
     if (!parsedAmount || parsedAmount <= 0) {
-      return res.status(400).json({ status: false, message: 'Invalid deposit amount' });
+      return res
+        .status(400)
+        .json({ status: false, message: 'Invalid deposit amount' });
     }
 
-    // ----------------------------------------
-    // ️🔍 LOAD MIN DEPOSIT FROM SYSTEM SETTINGS
-    // ----------------------------------------
+    // validate sender_name
+    if (!sender_name || String(sender_name).trim().length < 2) {
+      return res
+        .status(400)
+        .json({ status: false, message: 'Sender account name is required' });
+    }
+
+    // validate sender_bank
+    if (!sender_bank || String(sender_bank).trim().length < 2) {
+      return res
+        .status(400)
+        .json({ status: false, message: 'Sender bank is required' });
+    }
+
+    const cleanSenderName = String(sender_name).trim();
+    const cleanSenderBank = String(sender_bank).trim();
+
+    // 1) Load min_deposit from system_settings
     const minDeposit = Number(await getSystemSetting('min_deposit')) || 100;
 
     if (parsedAmount < minDeposit) {
@@ -46,105 +69,93 @@ async function initiateDeposit(req, res) {
       });
     }
 
-    // Ensure wallet exists
+    // 2) Ensure wallet exists
     const [walletRows] = await pool.query(
       'SELECT id FROM wallets WHERE user_id = ? LIMIT 1',
       [userId]
     );
 
     if (!walletRows.length) {
-      console.warn('depositController.initiateDeposit › wallet not found:', userId);
-      return res.status(400).json({ status: false, message: 'Wallet not found' });
+      console.warn(
+        'depositController.initiateDeposit › wallet not found for user:',
+        userId
+      );
+      return res
+        .status(400)
+        .json({ status: false, message: 'Wallet not found' });
     }
 
     const walletId = walletRows[0].id;
-    const reference = generateReference('DEP');
 
-    let provider = 'flutterwave';
-    let bankDetails = null;
+    // 3) Generate unique reference (for SMS matching + admin UI)
+    const reference = generateReference('DEP'); // e.g. DEP_...
 
-    // Try flutterwave
-    try {
-      bankDetails = await createFlutterwaveTransfer(
-        req.user,
-        parsedAmount,
-        reference
-      );
-      provider = 'flutterwave';
-    } catch (err) {
-      console.error(
-        'Flutterwave failed → trying Paystack:',
-        err.response?.data || err.message || err
-      );
+    // 4) Compute expiry (now + 15 min)
+    const expiresAt = new Date(Date.now() + PENDING_EXPIRES_MIN * 60 * 1000);
 
-      // Fallback
-      try {
-        bankDetails = await createPaystackTransfer(
-          req.user,
-          parsedAmount,
-          reference
-        );
-        provider = 'paystack';
-      } catch (err2) {
-        console.error(
-          'Paystack fallback also failed:',
-          err2.response?.data || err2.message || err2
-        );
-        return res.status(502).json({
-          status: false,
-          message: 'Unable to generate deposit account at the moment. Please try again.'
-        });
-      }
-    }
-
-    // Insert pending transaction
-    const [result] = await pool.query(
-      `INSERT INTO transactions
-        (wallet_id, user_id, type, amount, provider, status, reference, metadata, created_at, updated_at)
-       VALUES (?, ?, 'deposit', ?, ?, 'pending', ?, ?, NOW(), NOW())`,
+    // 5) Insert into pending_deposits (NOT transactions yet)
+    const [ins] = await pool.query(
+      `
+        INSERT INTO pending_deposits
+          (user_id, wallet_id, amount, sender_name, sender_bank, reference, status, expires_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, NOW(), NOW())
+      `,
       [
-        walletId,
         userId,
+        walletId,
         parsedAmount,
-        provider,
+        cleanSenderName,
+        cleanSenderBank,
         reference,
-        JSON.stringify({
-          bank_details: bankDetails,
-          provider
-        })
+        expiresAt
       ]
     );
 
     console.log(
-      `depositController.initiateDeposit › txn id: ${result.insertId}, provider: ${provider}`
+      'depositController.initiateDeposit › pending_deposits.id:',
+      ins.insertId
     );
 
-    await auditLog(
-      userId,
-      'deposit_initiated',
-      `Deposit initiated for ₦${parsedAmount} via ${provider}`,
-      {
-        reference,
-        amount: parsedAmount,
-        provider
-      }
-    );
+    // 6) Audit log
+    try {
+      await auditLog(
+        null, // adminId (null – user initiated)
+        userId,
+        'MANUAL_DEPOSIT_INITIATED',
+        'pending_deposits',
+        ins.insertId,
+        {
+          amount: parsedAmount,
+          reference,
+          sender_name: cleanSenderName,
+          sender_bank: cleanSenderBank,
+          expires_at: expiresAt.toISOString()
+        }
+      );
+    } catch (aErr) {
+      console.warn(
+        'depositController.initiateDeposit › auditLog failed',
+        aErr
+      );
+    }
 
+    // 7) Respond to frontend
     return res.json({
       status: true,
-      message: 'Deposit initiated. Transfer to the provided account to fund your wallet.',
+      message: `Deposit created. Transfer the exact amount to the bank account within ${PENDING_EXPIRES_MIN} minutes.`,
       data: {
         reference,
-        provider,
+        amount: parsedAmount,
+        expires_at: expiresAt.toISOString(),
+        sender_name: cleanSenderName,
+        sender_bank: cleanSenderBank,
         bank: {
-          bank_name: bankDetails.bank_name,
-          account_number: bankDetails.account_number,
-          account_name: bankDetails.account_name,
-          expires_at: bankDetails.expires_at
+          bank_name: TREBETTA_BANK.bank_name,
+          account_number: TREBETTA_BANK.account_number,
+          account_name: TREBETTA_BANK.account_name
         }
       }
     });
-
   } catch (err) {
     console.error('❌ depositController.initiateDeposit ERROR:', err);
     return res.status(500).json({
@@ -154,6 +165,68 @@ async function initiateDeposit(req, res) {
   }
 }
 
+// ---------------------------------------------------------
+// GET MOST RECENT ACTIVE PENDING DEPOSIT
+// ---------------------------------------------------------
+async function getPendingDeposit(req, res) {
+  const userId = req.user.id;
+
+  try {
+    // Fetch latest active pending deposit
+    const [rows] = await pool.query(
+      `
+      SELECT 
+        id, reference, amount, sender_name, sender_bank, expires_at, status
+      FROM pending_deposits
+      WHERE user_id = ?
+        AND status = 'pending'
+        AND expires_at > NOW()
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+      [userId]
+    );
+
+    if (!rows.length) {
+      return res.json({
+        status: true,
+        data: null
+      });
+    }
+
+    const dep = rows[0];
+
+    // Same bank info used in initiateDeposit()
+    const TREBETTA_BANK = {
+      bank_name: 'STERLING BANK',
+      account_name: 'HORIZON BLUE BLISS GLOBAL',
+      account_number: '0116012103'
+    };
+
+    return res.json({
+      status: true,
+      data: {
+        reference: dep.reference,
+        amount: Number(dep.amount),
+        expires_at: dep.expires_at,
+        sender_name: dep.sender_name || null,
+        sender_bank: dep.sender_bank || null,
+        bank: TREBETTA_BANK
+      }
+    });
+
+  } catch (err) {
+    console.error('❌ getPendingDeposit ERROR:', err);
+    return res.status(500).json({
+      status: false,
+      message: 'Failed to load pending deposit'
+    });
+  }
+}
+
 module.exports = {
-  initiateDeposit
+  initiateDeposit,
+  getPendingDeposit
 };
+
+

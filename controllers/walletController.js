@@ -32,6 +32,9 @@ async function getWallet(req, res) {
 // ---------------------------------------------------------
 // GET TRANSACTION HISTORY
 // ---------------------------------------------------------
+// ---------------------------------------------------------
+// GET TRANSACTION HISTORY (Deposit, Withdrawal, Admin Credit ONLY)
+// ---------------------------------------------------------
 async function getTransactions(req, res) {
   console.log('[WALLET] getTransactions › user:', req.user.id);
 
@@ -40,28 +43,84 @@ async function getTransactions(req, res) {
   const offset = (page - 1) * limit;
 
   try {
-    const [rows] = await pool.query(
-      `SELECT 
-          id, user_id, type, amount, provider, reference, status,
-          metadata, balance_before, balance_after, created_at
+    // 1️⃣ Count total relevant transactions
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) AS total
        FROM transactions
        WHERE user_id = ?
+         AND type IN ('deposit', 'withdrawal', 'admin_credit')`,
+      [req.user.id]
+    );
+
+    const total = countRows[0].total;
+    const page_count = Math.ceil(total / limit);
+
+    // 2️⃣ Fetch paginated history
+    const [rows] = await pool.query(
+      `SELECT 
+          id,
+          user_id,
+          type,
+          amount,
+          provider,
+          reference,
+          status,
+          metadata,
+          balance_before,
+          balance_after,
+          created_at
+       FROM transactions
+       WHERE user_id = ?
+         AND type IN ('deposit', 'withdrawal', 'admin_credit')
        ORDER BY created_at DESC
        LIMIT ? OFFSET ?`,
       [req.user.id, limit, offset]
     );
 
+    // 3️⃣ Parse metadata (JSON → object)
+    const cleanRows = rows.map(tx => {
+      let meta = null;
+
+      try {
+        meta = tx.metadata ? JSON.parse(tx.metadata) : null;
+      } catch (e) {
+        meta = null;
+      }
+
+      return {
+        id: tx.id,
+        type: tx.type,
+        amount: Number(tx.amount),
+        provider: tx.provider,
+        reference: tx.reference,
+        status: tx.status, // EXACT status from DB
+        metadata: meta,
+        balance_before: Number(tx.balance_before),
+        balance_after: Number(tx.balance_after),
+        created_at: tx.created_at
+      };
+    });
+
     return res.json({
       status: true,
-      data: rows,
-      meta: { page, limit }
+      data: cleanRows,
+      pagination: {
+        page,
+        limit,
+        total,
+        page_count
+      }
     });
 
   } catch (err) {
     console.error('[WALLET] ERROR getTransactions:', err);
-    return res.status(500).json({ status: false, message: 'Server error' });
+    return res.status(500).json({
+      status: false,
+      message: 'Server error'
+    });
   }
 }
+
 
 
 // ---------------------------------------------------------

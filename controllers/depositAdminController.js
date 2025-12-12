@@ -16,7 +16,6 @@ async function manualDeposit(req, res) {
   const adminId = req.user?.id;
   let { user_id, amount, reason } = req.body || {};
 
-  // --- VALIDATE INPUTS ---
   const amt = Number(amount);
   if (!user_id || isNaN(amt) || amt <= 0) {
     return res.status(400).json({ status: false, message: "Invalid amount or user_id" });
@@ -28,6 +27,7 @@ async function manualDeposit(req, res) {
   try {
     await conn.beginTransaction();
 
+    // 1️⃣ Get wallet
     const [wallets] = await conn.query(
       "SELECT * FROM wallets WHERE user_id = ? LIMIT 1",
       [user_id]
@@ -41,7 +41,7 @@ async function manualDeposit(req, res) {
     const balanceBefore = Number(wallet.balance || 0);
     const balanceAfter = Number((balanceBefore + amt).toFixed(2));
 
-    // --- UPDATE WALLET ---
+    // 2️⃣ Update wallet balance
     await conn.query(
       "UPDATE wallets SET balance = ?, updated_at = NOW() WHERE id = ?",
       [balanceAfter, wallet.id]
@@ -49,7 +49,7 @@ async function manualDeposit(req, res) {
 
     const reference = genRef("ADMIN_DEP");
 
-    // --- CREATE TRANSACTION ---
+    // 3️⃣ Insert transaction record
     await createTransactionRecord(conn, {
       user_id: Number(user_id),
       wallet_id: wallet.id,
@@ -59,19 +59,19 @@ async function manualDeposit(req, res) {
       balance_after: balanceAfter,
       reference,
       description,
-      provider: "Manual",
+      provider: "manual",
       admin_id: adminId,
       status: "completed"
     });
 
-    // --- AUDIT LOG ---
+    // 4️⃣ Correct auditLog call
     await auditLog(
-      conn,
-      adminId,
-      "ADMIN_MANUAL_DEPOSIT",
-      "wallets",
-      wallet.id,
-      { user_id, amount: amt, balance_after: balanceAfter }
+      adminId,                   // admin performing the action
+      Number(user_id),           // affected user
+      "ADMIN_MANUAL_DEPOSIT",    // action
+      "wallets",                 // entity
+      wallet.id,                 // entity_id
+      { amount: amt, balance_after: balanceAfter, reference }
     );
 
     await conn.commit();
@@ -90,7 +90,6 @@ async function manualDeposit(req, res) {
     conn.release();
   }
 }
-
 /**
  * ---------------------------------------------------------
  * ADMIN LIST ALL DEPOSITS
