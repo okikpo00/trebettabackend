@@ -4,11 +4,10 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const validator = require('validator');
+const notify = require('../utils/notify');
 
-const sendEmail = require('../utils/mailer');
 const { genAccessToken, genRefreshToken, hashToken } = require('../utils/tokens');
 const { auditLog } = require('../utils/auditLog');
-const { sendNotification } = require('../utils/notificationService');
 
 const REFRESH_COOKIE_NAME = process.env.COOKIE_NAME_REFRESH || 'trebetta_rt';
 const REFRESH_EXPIRES_DAYS = Number(process.env.JWT_REFRESH_EXPIRES_DAYS || 7);
@@ -152,9 +151,18 @@ exports.register = async (req, res) => {
     await conn.commit();
 
     const verifyUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-email?token=${rawVerifyToken}`;
-    safeSendEmail(emailNorm, 'Trebetta - Verify your email', `<p>Hello ${first_name || ''},</p><p>Click to verify: <a href="${verifyUrl}">${verifyUrl}</a></p>`);
-
-    sendNotification(userId, 'Welcome! Verify your email to activate deposits.');
+    await notify({
+  userId,
+  email: emailNorm,
+  title: 'Welcome to Trebetta 🎉',
+  message: `Welcome ${first_name || ''}! Please verify your email to activate deposits.\n\nVerify here: ${verifyUrl}`,
+  type: 'security',
+  severity: 'info',
+  metadata: {
+    action: 'register',
+    verify_url: verifyUrl
+  }
+});
 
     return res.status(201).json({ success: true, message: 'Registration successful. Verify email to activate deposits.', userId });
   } catch (err) {
@@ -190,8 +198,18 @@ exports.verifyEmail = async (req, res) => {
       await conn.execute('UPDATE verification_tokens SET used = 1 WHERE id = ?', [rec.id]);
       await auditLog(conn, userId, 'VERIFY_EMAIL', 'user', userId, { via: 'token' });
       await conn.commit();
+await notify({
+  userId,
+  email: user.email,
+  title: 'Email Verified ✅',
+  message: 'Your email has been verified successfully. You can now deposit funds into your Trebetta wallet.',
+  type: 'security',
+  severity: 'success',
+  metadata: {
+    action: 'verify_email'
+  }
+});
 
-      sendNotification(userId, 'Email verified! You can now deposit funds.');
       return res.json({ success: true, message: 'Email verified successfully.' });
     } catch (e) {
       await conn.rollback();
@@ -386,7 +404,19 @@ exports.forgotPassword = async (req, res) => {
     ]);
 
     const link = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${rawToken}`;
-    safeSendEmail(emailNorm, 'Trebetta - Password reset', `<p>Hello ${user.first_name || ''},</p><p>Reset your password: <a href="${link}">${link}</a></p>`);
+await notify({
+  userId: user.id,
+  email: emailNorm,
+  title: 'Password Reset Requested',
+  message: `A password reset was requested for your account.\n\nReset link: ${link}\n\nIf this wasn’t you, please secure your account immediately.`,
+  type: 'security',
+  severity: 'warning',
+  metadata: {
+    action: 'password_reset_request',
+    reset_link: link
+  }
+});
+
 
     await auditLog(null, user.id, 'FORGOT_PASSWORD', 'user', user.id, {});
     return res.json({ success: true, message: 'If account exists, reset link sent (check email)' });
@@ -420,6 +450,17 @@ exports.resetPassword = async (req, res) => {
 
     // Revoke old refresh tokens for multi-device safety
     await pool.query('UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?', [rec.user_id]);
+await notify({
+  userId: rec.user_id,
+  email: user.email,
+  title: 'Password Reset Successful',
+  message: 'Your password has been reset successfully. If this wasn’t you, please contact support immediately.',
+  type: 'security',
+  severity: 'success',
+  metadata: {
+    action: 'password_reset_complete'
+  }
+});
 
     await auditLog(null, rec.user_id, 'RESET_PASSWORD', 'user', rec.user_id, {});
     return res.json({ success: true, message: 'Password reset successful' });

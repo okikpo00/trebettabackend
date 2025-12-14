@@ -105,11 +105,25 @@ exports.submitKyc = async (req, res) => {
     );
 
     // 5) Notify user (non-blocking)
-    await safeNotify({
-      userId,
-      title: 'KYC submitted',
-      message: 'Your KYC has been submitted and is pending review.'
-    });
+const [[user]] = await pool.query(
+  'SELECT email FROM users WHERE id = ? LIMIT 1',
+  [userId]
+);
+
+await safeNotify({
+  userId,
+  email: user?.email,
+  title: 'KYC Submitted',
+  message: 'Your KYC documents have been submitted successfully and are currently under review. You will be notified once a decision is made.',
+  type: 'security',
+  severity: 'info',
+  metadata: {
+    kyc_id: kycId,
+    document_type
+  }
+});
+
+
 
     return res.status(201).json({
       status: true,

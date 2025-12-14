@@ -4,7 +4,8 @@ const bcrypt = require('bcryptjs');
 
 const generateReference = require('../utils/generateReference');
 const { auditLog } = require('../utils/auditLog');
-const sendEmail = require('../utils/mailer');
+const notify = require('../utils/notify');
+
 const limits = require('../utils/limits');
 const walletService = require('../services/walletService');
 const slipService = require('../services/slipService');
@@ -325,11 +326,26 @@ async function initiateWithdraw(req, res) {
 
     // Send OTP email (best-effort)
     try {
-      await sendEmail(
-        user.email,
-        'Trebetta Withdrawal OTP',
-        `Your OTP is ${otp}. It expires in ${WITHDRAWAL_EXPIRE_MIN} minutes.`
-      );
+     try {
+  await notify({
+    userId,
+    email: user.email,
+    title: 'Withdrawal OTP Sent',
+    message: `You initiated a withdrawal of ₦${parsedAmount.toLocaleString()}.\n\nYour OTP is ${otp}.\nIt expires in ${WITHDRAWAL_EXPIRE_MIN} minutes.\n\nReference: ${reference}`,
+    type: 'withdrawal',
+    severity: 'warning',
+    metadata: {
+      reference,
+      amount: parsedAmount,
+      fee,
+      bank_code: finalBankCode,
+      account_number: finalAccountNumber?.slice(-4)
+    }
+  });
+} catch (nErr) {
+  console.warn('withdraw initiate notify failed', nErr);
+}
+
     } catch (emailErr) {
       console.error(
         'withdrawController.initiateWithdraw › OTP email error:',
@@ -547,6 +563,24 @@ async function confirmWithdraw(req, res) {
       }
 
       await conn.commit();
+      try {
+  await notify({
+    userId,
+    email: user.email,
+    title: 'Withdrawal Processing',
+    message: `Your withdrawal of ₦${Number(wr.amount).toLocaleString()} is now being processed.\n\nReference: ${wr.reference}`,
+    type: 'withdrawal',
+    severity: 'info',
+    metadata: {
+      reference: wr.reference,
+      amount: Number(wr.amount),
+      status: 'processing'
+    }
+  });
+} catch (nErr) {
+  console.warn('withdraw confirm notify failed', nErr);
+}
+
       conn.release();
 
       return res.json({
@@ -613,6 +647,19 @@ async function createPin(req, res) {
       null,
       { message: 'PIN created' }
     );
+try {
+  await notify({
+    userId,
+    email: user.email,
+    title: 'Transaction PIN Created',
+    message: 'Your transaction PIN was created successfully.',
+    type: 'security',
+    severity: 'success',
+    metadata: { action: 'pin_created' }
+  });
+} catch (e) {
+  console.warn('PIN created notify failed', e);
+}
 
     return res.json({
       status: true,
@@ -678,6 +725,19 @@ async function changePin(req, res) {
       null,
       { message: 'PIN changed' }
     );
+try {
+  await notify({
+    userId,
+    email: user.email,
+    title: 'Transaction PIN Changed',
+    message: 'Your transaction PIN was changed successfully. If this wasn’t you, contact support immediately.',
+    type: 'security',
+    severity: 'warning',
+    metadata: { action: 'pin_changed' }
+  });
+} catch (e) {
+  console.warn('PIN changed notify failed', e);
+}
 
     return res.json({
       status: true,
@@ -796,14 +856,19 @@ async function requestPinReset(req, res) {
     );
 
     try {
-      await sendEmail(
-        user.email,
-        'Trebetta PIN Reset OTP',
-        `Your OTP for resetting your transaction PIN is ${otp}. It expires in 10 minutes.`
-      );
-    } catch (emailErr) {
-      console.error('requestPinReset › OTP email error:', emailErr);
-    }
+  await notify({
+    userId,
+    email: user.email,
+    title: 'PIN Reset OTP Sent',
+    message: `You requested to reset your transaction PIN.\n\nYour OTP is ${otp}. It expires in 10 minutes.`,
+    type: 'security',
+    severity: 'warning',
+    metadata: { action: 'pin_reset_requested' }
+  });
+} catch (e) {
+  console.warn('PIN reset request notify failed', e);
+}
+
 
     await auditLog(
       null,
@@ -911,6 +976,19 @@ async function resetPin(req, res) {
       null,
       { message: 'PIN reset successfully' }
     );
+try {
+  await notify({
+    userId,
+    email: user.email,
+    title: 'Transaction PIN Reset',
+    message: 'Your transaction PIN was reset successfully.',
+    type: 'security',
+    severity: 'success',
+    metadata: { action: 'pin_reset_completed' }
+  });
+} catch (e) {
+  console.warn('PIN reset complete notify failed', e);
+}
 
     return res.json({
       status: true,

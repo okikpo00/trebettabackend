@@ -1,60 +1,240 @@
-// controllers/notificationController.js
 const pool = require('../config/db');
-const sendEmail  = require('../utils/mailer'); 
-// admin: create notification (broadcast if user_id omitted)
-exports.createNotification = async (req, res) => {
-  const { user_id, type, title, message, data } = req.body || {};
+
+/**
+ * ---------------------------------------------------------
+ * GET USER NOTIFICATIONS (Paginated)
+ * GET /notifications
+ * Query:
+ *  - page (default 1)
+ *  - limit (default 20, max 50)
+ * ---------------------------------------------------------
+ */
+async function getNotifications(req, res) {
+  const userId = req.user.id;
+
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const limit = Math.min(Number(req.query.limit) || 20, 50);
+  const offset = (page - 1) * limit;
+
   try {
-    const [r] = await pool.query(
-      `INSERT INTO notifications (user_id, type, title, message, data) VALUES (?, ?, ?, ?, ?)`,
-      [user_id || null, type || null, title, message, data ? JSON.stringify(data) : null]
+    const [[countRow]] = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM notifications
+       WHERE user_id = ?`,
+      [userId]
     );
 
-    // if broadcast (user_id null), you may want to insert notification_recipients rows or use push service
-    res.status(201).json({ message: 'Notification created', id: r.insertId });
+    const total = Number(countRow.total || 0);
+
+    const [rows] = await pool.query(
+      `SELECT
+         id,
+         title,
+         message,
+         type,
+         severity,
+         is_read,
+         metadata,
+         created_at
+       FROM notifications
+       WHERE user_id = ?
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?`,
+      [userId, limit, offset]
+    );
+
+    const data = rows.map(n => {
+      let metadata = null;
+      try {
+        metadata = n.metadata ? JSON.parse(n.metadata) : null;
+      } catch {
+        metadata = null;
+      }
+
+      return {
+        id: n.id,
+        title: n.title,
+        message: n.message,
+        type: n.type,
+        severity: n.severity,
+        is_read: Boolean(n.is_read),
+        metadata,
+        created_at: n.created_at
+      };
+    });
+
+    return res.json({
+      status: true,
+      data,
+      pagination: {
+        page,
+        limit,
+        total,
+        page_count: Math.ceil(total / limit)
+      }
+    });
+
   } catch (err) {
-    console.error('createNotification err', err);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[NOTIFICATION] getNotifications error:', err);
+    return res.status(500).json({
+      status: false,
+      message: 'Failed to load notifications'
+    });
   }
-};
+}
 
-// user: get notifications for self
-exports.myNotifications = async (req, res) => {
+/**
+ * ---------------------------------------------------------
+ * GET UNREAD COUNT
+ * GET /notifications/unread-count
+ * ---------------------------------------------------------
+ */
+async function getUnreadCount(req, res) {
+  const userId = req.user.id;
+
   try {
-    const [rows] = await pool.query('SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100', [req.user.id]);
-    res.json(rows);
+    const [[row]] = await pool.query(
+      `SELECT COUNT(*) AS unread
+       FROM notifications
+       WHERE user_id = ? AND is_read = 0`,
+      [userId]
+    );
+
+    return res.json({
+      status: true,
+      unread: Number(row.unread || 0)
+    });
+
   } catch (err) {
-    console.error('myNotifications err', err);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[NOTIFICATION] getUnreadCount error:', err);
+    return res.status(500).json({
+      status: false,
+      message: 'Failed to load unread count'
+    });
   }
-};
+}
 
-// admin: send notification (broadcast if user_id omitted)
-exports.sendNotification = async (req, res) => {
-  const { user_id, title, message } = req.body;
+/**
+ * ---------------------------------------------------------
+ * MARK ONE NOTIFICATION AS READ
+ * PATCH /notifications/:id/read
+ * ---------------------------------------------------------
+ */
+async function markAsRead(req, res) {
+  const userId = req.user.id;
+  const id = Number(req.params.id);
 
-  if (!user_id || !title || !message) {
-    return res.status(400).json({ message: 'user_id, title, and message required' });
+  if (!id) {
+    return res.status(400).json({
+      status: false,
+      message: 'Invalid notification id'
+    });
   }
 
   try {
-    // get user email
-    const [rows] = await pool.query('SELECT email FROM users WHERE id = ? LIMIT 1', [user_id]);
-    if (!rows.length) return res.status(404).json({ message: 'User not found' });
-    const user = rows[0];
+    const [result] = await pool.query(
+      `UPDATE notifications
+       SET is_read = 1
+       WHERE id = ? AND user_id = ?
+       LIMIT 1`,
+      [id, userId]
+    );
 
-    // send email
-    await sendEmail(user.email, title, message);
+    if (!result.affectedRows) {
+      return res.status(404).json({
+        status: false,
+        message: 'Notification not found'
+      });
+    }
 
-    // save notification record
+    return res.json({
+      status: true,
+      message: 'Notification marked as read'
+    });
+
+  } catch (err) {
+    console.error('[NOTIFICATION] markAsRead error:', err);
+    return res.status(500).json({
+      status: false,
+      message: 'Failed to update notification'
+    });
+  }
+}
+
+/**
+ * ---------------------------------------------------------
+ * MARK ALL AS READ
+ * PATCH /notifications/read-all
+ * ---------------------------------------------------------
+ */
+async function markAllAsRead(req, res) {
+  const userId = req.user.id;
+
+  try {
     await pool.query(
-      'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)',
-      [user_id, title, message, 'email']
+      `UPDATE notifications
+       SET is_read = 1
+       WHERE user_id = ? AND is_read = 0`,
+      [userId]
     );
 
-    res.json({ message: 'Notification sent successfully', user_id });
+    return res.json({
+      status: true,
+      message: 'All notifications marked as read'
+    });
+
   } catch (err) {
-    console.error('sendNotification err', err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    console.error('[NOTIFICATION] markAllAsRead error:', err);
+    return res.status(500).json({
+      status: false,
+      message: 'Failed to update notifications'
+    });
   }
+}
+
+/**
+ * ---------------------------------------------------------
+ * DELETE NOTIFICATION (optional UX)
+ * DELETE /notifications/:id
+ * ---------------------------------------------------------
+ */
+async function deleteNotification(req, res) {
+  const userId = req.user.id;
+  const id = Number(req.params.id);
+
+  try {
+    const [result] = await pool.query(
+      `DELETE FROM notifications
+       WHERE id = ? AND user_id = ?
+       LIMIT 1`,
+      [id, userId]
+    );
+
+    if (!result.affectedRows) {
+      return res.status(404).json({
+        status: false,
+        message: 'Notification not found'
+      });
+    }
+
+    return res.json({
+      status: true,
+      message: 'Notification deleted'
+    });
+
+  } catch (err) {
+    console.error('[NOTIFICATION] deleteNotification error:', err);
+    return res.status(500).json({
+      status: false,
+      message: 'Failed to delete notification'
+    });
+  }
+}
+
+module.exports = {
+  getNotifications,
+  getUnreadCount,
+  markAsRead,
+  markAllAsRead,
+  deleteNotification
 };

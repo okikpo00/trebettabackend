@@ -52,7 +52,7 @@ const { adminApiLimiter } = require('./middleware/rateLimiter');
 const bankAlertRoutes = require('./routes/bankAlertRoutes');
 const adminDepositMatchRoutes = require('./routes/adminDepositMatchRoutes');
 const publicRoutes = require('./routes/publicRoutes');
-
+const notificationRoutes = require('./routes/notificationRoutes');
 const app = express();
 
 // CORS config
@@ -158,7 +158,7 @@ app.use('/api/admin', adminProfileRoutes);
 app.use('/api/admin/settings', adminSettingRoutes);
 app.use('/api/internal/bank', bankAlertRoutes);
 app.use('/api/admin/deposits', adminDepositMatchRoutes);
-
+app.use('/api/notifications', notificationRoutes);
 app.use('/api/public', publicRoutes);
 
 app.use('/api/admin', adminApiLimiter);

@@ -3,6 +3,7 @@ const pool = require('../config/db');
 const generateReference = require('../utils/generateReference');
 const { auditLog } = require('../utils/auditLog');
 const { getSystemSetting } = require('../services/settingsService');
+const notify = require('../utils/notify');
 
 // STATIC BANK DETAILS FOR MANUAL DEPOSIT
 // ⚠️ Make sure these match your Sterling business account exactly
@@ -138,6 +139,35 @@ async function initiateDeposit(req, res) {
         aErr
       );
     }
+    // 6.5) Notify user (NON-BLOCKING)
+try {
+  // fetch user email (minimal query, no logic change)
+  const [[user]] = await pool.query(
+    'SELECT email FROM users WHERE id = ? LIMIT 1',
+    [userId]
+  );
+
+  if (user?.email) {
+    await notify({
+      userId,
+      email: user.email,
+      title: 'Deposit Initiated',
+      message: `Your deposit of ₦${parsedAmount.toLocaleString()} has been initiated.\n\nTransfer the exact amount to:\n${TREBETTA_BANK.bank_name}\n${TREBETTA_BANK.account_number}\n${TREBETTA_BANK.account_name}\n\nReference: ${reference}\n\nThis request expires in ${PENDING_EXPIRES_MIN} minutes.`,
+      type: 'deposit',
+      severity: 'info',
+      metadata: {
+        amount: parsedAmount,
+        reference,
+        expires_at: expiresAt.toISOString(),
+        sender_name: cleanSenderName,
+        sender_bank: cleanSenderBank
+      }
+    });
+  }
+} catch (nErr) {
+  console.warn('depositController › notify failed', nErr);
+}
+
 
     // 7) Respond to frontend
     return res.json({

@@ -2,7 +2,7 @@
 const pool = require('../config/db');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const sendEmail = require('../utils/mailer'); // CommonJS mailer util
+const notify = require('../utils/notify');
 const { hashToken } = require('../utils/tokens'); // existing util
 
 // Helper: normalize
@@ -123,11 +123,26 @@ exports.updateProfile = async (req, res) => {
 
       // send email (do not block commit on success/failure, but we will try)
       try {
-        const verifyUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-email?token=${rawToken}`;
-        await sendEmail(emailNorm,
-          'Trebetta — Verify your new email',
-          `<p>Hello,</p><p>Please verify your new email by clicking below:</p><a href="${verifyUrl}">${verifyUrl}</a>`
-        );
+        const verifyUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/verify-email?token=${rawToken}`;
+     try {
+  const verifyUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/verify-email?token=${rawToken}`;
+
+  await notify({
+    userId,
+    email: emailNorm,
+    title: 'Verify Your New Email Address',
+    message: `You recently updated your profile on Trebetta.\n\nPlease verify your new email address by clicking the link below:\n${verifyUrl}\n\nIf you did not make this change, contact support immediately.`,
+    type: 'security',
+    severity: 'warning',
+    metadata: {
+      action: 'email_change',
+      verify_url: verifyUrl
+    }
+  });
+} catch (nErr) {
+  console.error('Profile update notify error', nErr);
+}
+
       } catch (mailErr) {
         // log but proceed
         console.error('Profile update - sendEmail error', mailErr);
@@ -135,8 +150,31 @@ exports.updateProfile = async (req, res) => {
     }
 
     // For phone verification we would create an OTP entry similarly (not implemented here)
-
     await conn.commit();
+if (phoneChanged && !emailChanged) {
+  try {
+    const [[user]] = await pool.query(
+      'SELECT email FROM users WHERE id = ? LIMIT 1',
+      [userId]
+    );
+
+    if (user?.email) {
+      await notify({
+        userId,
+        email: user.email,
+        title: 'Profile Updated',
+        message: 'Your phone number was updated on your Trebetta account. If you did not make this change, please contact support immediately.',
+        type: 'security',
+        severity: 'warning',
+        metadata: {
+          action: 'phone_change'
+        }
+      });
+    }
+  } catch (nErr) {
+    console.warn('phone change notify failed', nErr);
+  }
+}
 
     // Return simple updated profile
     const [updated] = await pool.query('SELECT id, username, first_name, last_name, email, phone, is_email_verified, status FROM users WHERE id = ? LIMIT 1', [userId]);
@@ -174,6 +212,28 @@ exports.changePassword = async (req, res) => {
 
     // Revoke all refresh tokens (force re-login)
     await pool.query('UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?', [userId]);
+try {
+  const [[user]] = await pool.query(
+    'SELECT email FROM users WHERE id = ? LIMIT 1',
+    [userId]
+  );
+
+  if (user?.email) {
+    await notify({
+      userId,
+      email: user.email,
+      title: 'Password Changed Successfully',
+      message: 'Your Trebetta account password was changed successfully. If this was not you, please reset your password immediately and contact support.',
+      type: 'security',
+      severity: 'success',
+      metadata: {
+        action: 'password_change'
+      }
+    });
+  }
+} catch (nErr) {
+  console.warn('changePassword notify failed', nErr);
+}
 
     res.json({ message: 'Password changed successfully' });
   } catch (err) {

@@ -4,12 +4,14 @@ const { v4: uuidv4 } = require('uuid');
 const generateReference = require('../utils/generateReference');
 const createTransactionRecord = require('../utils/createTransactionRecord');
 const { auditLog } = require('../utils/auditLog');
-let notify = {};
-try { notify = require('../utils/notify'); } catch (e) { /* optional */ }
+
+let notify;
+try { notify = require('../utils/notify'); } catch { notify = null; }
 
 /**
- * LIST ALL WITHDRAWALS (formatted for frontend)
- * GET /admin/withdrawals
+ * ---------------------------------------------------------
+ * LIST ALL WITHDRAWALS (ADMIN)
+ * ---------------------------------------------------------
  */
 async function listAllWithdrawals(req, res) {
   try {
@@ -31,31 +33,28 @@ async function listAllWithdrawals(req, res) {
     if (user_id) { clauses.push('wr.user_id = ?'); params.push(user_id); }
     if (reference) { clauses.push('wr.reference LIKE ?'); params.push(`%${reference}%`); }
     if (from && to) {
-      clauses.push('DATE(wr.requested_at) BETWEEN ? AND ?'); params.push(from, to);
+      clauses.push('DATE(wr.requested_at) BETWEEN ? AND ?');
+      params.push(from, to);
     } else if (from) {
-      clauses.push('DATE(wr.requested_at) >= ?'); params.push(from);
+      clauses.push('DATE(wr.requested_at) >= ?');
+      params.push(from);
     } else if (to) {
-      clauses.push('DATE(wr.requested_at) <= ?'); params.push(to);
+      clauses.push('DATE(wr.requested_at) <= ?');
+      params.push(to);
     }
 
-    const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-    // count
-    const [countRows] = await pool.query(
-      `SELECT COUNT(*) AS total
-       FROM withdrawal_requests wr
-       LEFT JOIN users u ON u.id = wr.user_id
-       ${where}`,
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM withdrawal_requests wr ${where}`,
       params
     );
-    const total = Number(countRows[0]?.total || 0);
 
     const [rows] = await pool.query(
       `SELECT
-         wr.id, wr.user_id, wr.wallet_id, wr.amount, wr.fee, wr.currency, wr.status,
-         wr.reference, wr.bank_name, wr.account_number, wr.account_name,
-         wr.requested_at, wr.processed_at, wr.completed_at, wr.metadata, wr.reviewed_by,
-         u.username, u.email
+        wr.*,
+        u.username,
+        u.email
        FROM withdrawal_requests wr
        LEFT JOIN users u ON u.id = wr.user_id
        ${where}
@@ -64,24 +63,22 @@ async function listAllWithdrawals(req, res) {
       [...params, Number(limit), Number(offset)]
     );
 
-    // clean rows for frontend
     const data = rows.map(r => {
       let metadata = {};
-      try { metadata = r.metadata ? JSON.parse(r.metadata) : {}; } catch (e) { metadata = {}; }
-
-      const payout_amount = Number(r.amount) - Number(r.fee || 0);
+      try { metadata = r.metadata ? JSON.parse(r.metadata) : {}; } catch {}
 
       return {
         id: r.id,
-        user_id: r.user_id,
-        user: { username: r.username, email: r.email },
-        wallet_id: r.wallet_id,
+        reference: r.reference,
+        user: {
+          id: r.user_id,
+          username: r.username,
+          email: r.email
+        },
         amount: Number(r.amount),
         fee: Number(r.fee || 0),
-        payout_amount,
-        currency: r.currency || 'NGN',
+        payout_amount: Number(r.amount) - Number(r.fee || 0),
         status: r.status,
-        reference: r.reference,
         bank: {
           bank_name: r.bank_name,
           account_number: r.account_number,
@@ -106,107 +103,97 @@ async function listAllWithdrawals(req, res) {
       }
     });
   } catch (err) {
-    console.error('listAllWithdrawals err', err);
-    return res.status(500).json({ status: false, message: 'Server error', error: err.message });
+    console.error('listAllWithdrawals error', err);
+    return res.status(500).json({ status: false, message: 'Server error' });
   }
 }
 
 /**
- * APPROVE WITHDRAWAL (Manual payout)
- * POST /admin/withdrawals/:id/approve
- *
- * Contract (Option A):
- * - Admin approves a request that must already be in status = 'processing'
- *   (meaning user already verified OTP and wallet was debited).
- * - Admin approves => mark request completed. DO NOT touch wallets.
+ * ---------------------------------------------------------
+ * APPROVE WITHDRAWAL
+ * ---------------------------------------------------------
  */
 async function approveWithdrawal(req, res) {
-  const adminId = req.user?.id;
+  const adminId = req.user.id;
   const id = Number(req.params.id);
 
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
 
-    // Lock withdrawal row
-    const [wrRows] = await conn.query('SELECT * FROM withdrawal_requests WHERE id = ? FOR UPDATE', [id]);
-    if (!wrRows.length) {
+    const [rows] = await conn.query(
+      'SELECT * FROM withdrawal_requests WHERE id = ? FOR UPDATE',
+      [id]
+    );
+    if (!rows.length) {
       await conn.rollback();
       return res.status(404).json({ status: false, message: 'Withdrawal not found' });
     }
-    const wr = wrRows[0];
 
-    // Only allow approving processing requests (user already confirmed / debited)
+    const wr = rows[0];
+
     if (wr.status !== 'processing') {
       await conn.rollback();
       return res.status(400).json({
         status: false,
-        message: `Withdrawal must be in 'processing' state to approve. Current status: ${wr.status}`
+        message: `Only processing withdrawals can be approved`
       });
     }
 
-    // Generate payout reference for admin record (not a payment provider call)
-    const payoutReference = `PAY-${Date.now()}-${uuidv4().slice(0,8)}`;
+    const payoutRef = `PAY-${Date.now()}-${uuidv4().slice(0, 8)}`;
 
-    // Update request to completed
     await conn.query(
       `UPDATE withdrawal_requests
        SET status = 'completed',
            reviewed_by = ?,
-           processed_at = COALESCE(processed_at, NOW()),
            completed_at = NOW(),
            metadata = JSON_SET(IFNULL(metadata, '{}'), '$.admin_payout_reference', ?)
        WHERE id = ?`,
-      [adminId, payoutReference, id]
+      [adminId, payoutRef, id]
     );
 
-    // Audit log
-    await auditLog(adminId, wr.user_id, 'ADMIN_APPROVE_WITHDRAWAL', 'withdrawal_requests', id, {
-      admin: adminId,
-      payout_reference: payoutReference,
-      amount: Number(wr.amount),
-      fee: Number(wr.fee || 0)
-    });
-
-    // Notify user (best-effort)
-    try {
-      if (typeof notify === 'function') {
-        await notify(wr.user_id, 'Withdrawal approved', `Your withdrawal ${wr.reference} of ₦${Number(wr.amount)} has been approved by admin.`);
-      } else if (notify && notify.sendEmail && wr.user_id) {
-        // optional fallback if notify helper provides explicit methods
-        // noop - keep safe
-      }
-    } catch (nerr) {
-      console.warn('approveWithdrawal notify error', nerr);
-    }
+    await auditLog(
+      adminId,
+      wr.user_id,
+      'ADMIN_APPROVE_WITHDRAWAL',
+      'withdrawal_requests',
+      id,
+      { payout_reference: payoutRef }
+    );
 
     await conn.commit();
 
+    if (notify) {
+      notify({
+        userId: wr.user_id,
+        title: 'Withdrawal completed',
+        message: `Your withdrawal ${wr.reference} has been completed successfully.`,
+        type: 'withdrawal',
+        severity: 'success',
+        metadata: { reference: wr.reference }
+      }).catch(() => {});
+    }
+
     return res.json({
       status: true,
-      message: 'Withdrawal approved and marked completed',
-      data: { id, reference: wr.reference, payout_reference: payoutReference }
+      message: 'Withdrawal approved and completed'
     });
   } catch (err) {
     await conn.rollback();
-    console.error('approveWithdrawal err', err);
-    return res.status(500).json({ status: false, message: 'Server error', error: err.message });
+    console.error('approveWithdrawal error', err);
+    return res.status(500).json({ status: false, message: 'Server error' });
   } finally {
     conn.release();
   }
 }
 
 /**
+ * ---------------------------------------------------------
  * REJECT WITHDRAWAL
- * POST /admin/withdrawals/:id/reject
- *
- * Behavior:
- * - If status = 'pending' → just mark rejected (wallet not debited yet).
- * - If status = 'processing' → refund the debited amount back to wallet and mark rejected.
- * - If status = 'completed' or already 'rejected' → prevent action.
+ * ---------------------------------------------------------
  */
 async function rejectWithdrawal(req, res) {
-  const adminId = req.user?.id;
+  const adminId = req.user.id;
   const id = Number(req.params.id);
   const { reason } = req.body || {};
 
@@ -214,37 +201,40 @@ async function rejectWithdrawal(req, res) {
   try {
     await conn.beginTransaction();
 
-    const [wrRows] = await conn.query('SELECT * FROM withdrawal_requests WHERE id = ? FOR UPDATE', [id]);
-    if (!wrRows.length) {
+    const [rows] = await conn.query(
+      'SELECT * FROM withdrawal_requests WHERE id = ? FOR UPDATE',
+      [id]
+    );
+    if (!rows.length) {
       await conn.rollback();
       return res.status(404).json({ status: false, message: 'Withdrawal not found' });
     }
-    const wr = wrRows[0];
 
-    if (['completed', 'rejected', 'failed'].includes(wr.status)) {
+    const wr = rows[0];
+
+    if (['completed', 'rejected'].includes(wr.status)) {
       await conn.rollback();
-      return res.status(400).json({ status: false, message: `Cannot reject withdrawal in status '${wr.status}'` });
+      return res.status(400).json({ status: false, message: 'Cannot reject this withdrawal' });
     }
 
-    // If it was processing, it means wallet already debited — refund
+    // REFUND if already debited
     if (wr.status === 'processing') {
-      // Get wallet row FOR UPDATE
-      const [walletRows] = await conn.query('SELECT id, balance FROM wallets WHERE id = ? FOR UPDATE', [wr.wallet_id]);
-      if (!walletRows.length) {
-        await conn.rollback();
-        return res.status(404).json({ status: false, message: 'Associated wallet not found for refund' });
-      }
-      const wallet = walletRows[0];
-      const balanceBefore = Number(wallet.balance || 0);
-      const refundAmount = Number(wr.amount || 0);
+      const [[wallet]] = await conn.query(
+        'SELECT id, balance FROM wallets WHERE id = ? FOR UPDATE',
+        [wr.wallet_id]
+      );
 
-      const balanceAfter = Number((balanceBefore + refundAmount).toFixed(2));
+      const refundAmount = Number(wr.amount);
+      const balanceBefore = Number(wallet.balance);
+      const balanceAfter = balanceBefore + refundAmount;
 
-      // Update wallet balance
-      await conn.query('UPDATE wallets SET balance = ?, updated_at = NOW() WHERE id = ?', [balanceAfter, wallet.id]);
+      await conn.query(
+        'UPDATE wallets SET balance = ? WHERE id = ?',
+        [balanceAfter, wallet.id]
+      );
 
-      // Create transaction record for refund
-      const refundReference = generateReference('REFUND');
+      const refundRef = generateReference('REFUND');
+
       await createTransactionRecord(conn, {
         user_id: wr.user_id,
         wallet_id: wallet.id,
@@ -252,85 +242,70 @@ async function rejectWithdrawal(req, res) {
         amount: refundAmount,
         balance_before: balanceBefore,
         balance_after: balanceAfter,
-        reference: refundReference,
-        description: `Refund for rejected withdrawal ${wr.reference}`,
-        provider: 'manual',
+        reference: refundRef,
+        description: `Refund for withdrawal ${wr.reference}`,
         admin_id: adminId,
         status: 'completed'
       });
 
-      // Mark withdrawal as rejected and record refund info
       await conn.query(
         `UPDATE withdrawal_requests
          SET status = 'rejected',
              rejection_reason = ?,
              reviewed_by = ?,
-             processed_at = COALESCE(processed_at, NOW()),
-             metadata = JSON_SET(IFNULL(metadata, '{}'), '$.refund_reference', ?, '$.refund_amount', ?),
-             updated_at = NOW()
+             metadata = JSON_SET(
+               IFNULL(metadata, '{}'),
+               '$.refund_reference', ?,
+               '$.refund_amount', ?
+             )
          WHERE id = ?`,
-        [reason || 'Rejected by admin', adminId, refundReference, refundAmount, id]
+        [reason || 'Rejected', adminId, refundRef, refundAmount, id]
       );
-
-      // audit
-      await auditLog(adminId, wr.user_id, 'ADMIN_REJECT_WITHDRAWAL_REFUNDED', 'withdrawal_requests', id, {
-        admin: adminId,
-        reason: reason || null,
-        refund_reference: refundReference,
-        refund_amount: refundAmount
-      });
-
-      // Notify user
-      try {
-        if (typeof notify === 'function') {
-          await notify(wr.user_id, 'Withdrawal rejected & refunded', `Your withdrawal ${wr.reference} has been rejected and ₦${refundAmount} refunded to your wallet. Reason: ${reason || 'No reason provided'}`);
-        }
-      } catch (nerr) {
-        console.warn('rejectWithdrawal notify error', nerr);
-      }
-
-      await conn.commit();
-      return res.json({
-        status: true,
-        message: 'Withdrawal rejected and refunded',
-        data: { id, refund_reference: refundReference, refund_amount: refundAmount }
-      });
+    } else {
+      // pending → no refund
+      await conn.query(
+        `UPDATE withdrawal_requests
+         SET status = 'rejected',
+             rejection_reason = ?,
+             reviewed_by = ?
+         WHERE id = ?`,
+        [reason || 'Rejected', adminId, id]
+      );
     }
 
-    // If status === 'pending' (user didn't confirm OTP / not debited): just mark rejected
-    await conn.query(
-      `UPDATE withdrawal_requests
-       SET status = 'rejected',
-           rejection_reason = ?,
-           reviewed_by = ?,
-           updated_at = NOW()
-       WHERE id = ?`,
-      [reason || 'Rejected by admin', adminId, id]
+    await auditLog(
+      adminId,
+      wr.user_id,
+      'ADMIN_REJECT_WITHDRAWAL',
+      'withdrawal_requests',
+      id,
+      { reason }
     );
 
-    await auditLog(adminId, wr.user_id, 'ADMIN_REJECT_WITHDRAWAL', 'withdrawal_requests', id, {
-      admin: adminId,
-      reason: reason || null
-    });
+    await conn.commit();
 
-    try {
-      if (typeof notify === 'function') {
-        await notify(wr.user_id, 'Withdrawal rejected', `Your withdrawal ${wr.reference} has been rejected. Reason: ${reason || 'No reason provided'}`);
-      }
-    } catch (nerr) {
-      console.warn('rejectWithdrawal notify error', nerr);
+    if (notify) {
+      notify({
+        userId: wr.user_id,
+        title: 'Withdrawal rejected',
+        message: `Your withdrawal ${wr.reference} was rejected. ${reason || ''}`,
+        type: 'withdrawal',
+        severity: 'warning'
+      }).catch(() => {});
     }
 
-    await conn.commit();
     return res.json({ status: true, message: 'Withdrawal rejected' });
-
   } catch (err) {
     await conn.rollback();
-    console.error('rejectWithdrawal err', err);
-    return res.status(500).json({ status: false, message: 'Server error', error: err.message });
+    console.error('rejectWithdrawal error', err);
+    return res.status(500).json({ status: false, message: 'Server error' });
   } finally {
     conn.release();
   }
 }
 
-module.exports = { listAllWithdrawals, approveWithdrawal, rejectWithdrawal };
+module.exports = {
+  listAllWithdrawals,
+  approveWithdrawal,
+  rejectWithdrawal
+};

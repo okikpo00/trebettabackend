@@ -1,33 +1,79 @@
-// utils/notify.js
-const sendEmail = require("./sendEmail");
-const sendNotification = require("./sendNotification");
-
+const pool = require('../config/db');
+const sendEmail = require('./sendEmail');
 
 /**
- * Central unified notifier
- * @param {object} params
- *   {number} userId
- *   {string} title
- *   {string} message
- *   {string[]} channels - ["inApp", "email"]
- *   {string} [email]
- 
- *   {string} [type] - info | success | warning | error
+ * CENTRAL NOTIFICATION ENGINE
+ *
+ * RULES:
+ * - Always save notification to DB
+ * - Always attempt email
+ * - Never crash the main request
+ *
+ * @param {Object} params
+ * @param {number} params.userId        (REQUIRED)
+ * @param {string} params.title         (REQUIRED)
+ * @param {string} params.message       (REQUIRED)
+ * @param {string} params.type          deposit | withdrawal | wallet | security | system
+ * @param {string} params.severity      info | success | warning | error
+ * @param {string} params.email         (REQUIRED for now)
+ * @param {Object} params.metadata      (optional)
  */
-async function notify({ userId, title, message, channels = ["inApp"], email, fcmToken, type = "info" }) {
+async function notify({
+  userId,
+  title,
+  message,
+  type,
+  severity = 'info',
+  email,
+  metadata = null
+}) {
+  if (!userId || !title || !message || !type) {
+    console.error('❌ notify.js missing required fields');
+    return;
+  }
+
+  // 1️⃣ Save in-app notification (NON-NEGOTIABLE)
   try {
-    if (channels.includes("inApp") && userId) {
-      await sendNotification(userId, title, message, type);
+    await pool.query(
+      `
+      INSERT INTO notifications
+        (user_id, title, message, type, severity, metadata)
+      VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      [
+        userId,
+        title,
+        message,
+        type,
+        severity,
+        metadata ? JSON.stringify(metadata) : null
+      ]
+    );
+  } catch (dbErr) {
+    console.error('❌ notify.js DB insert failed:', dbErr.message);
+  }
+
+  // 2️⃣ Send email (MANDATORY, best-effort)
+  if (email) {
+    try {
+      await sendEmail(
+        email,
+        title,
+        `
+          <div style="font-family: Arial, sans-serif;">
+            <h3>${title}</h3>
+            <p>${message}</p>
+            <p style="font-size:12px;color:#666;">
+              If this wasn’t you, please contact Trebetta support immediately.
+            </p>
+          </div>
+        `
+      );
+    } catch (emailErr) {
+      console.error('❌ notify.js email failed:', emailErr.message);
     }
-
-
-    if (channels.includes("email") && email) {
-      await sendEmail(email, title, `<p>${message}</p>`);
-    }
-
-    console.log(`✅ Notification sent [${channels.join(", ")}] → ${title}`);
-  } catch (err) {
-    console.error("❌ notify.js error:", err.message);
+  } else {
+    console.warn('⚠️ notify.js email missing for user:', userId);
   }
 }
 
