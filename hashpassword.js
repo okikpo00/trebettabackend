@@ -1,7 +1,7 @@
 // hashPassword.js
 const bcrypt = require('bcryptjs');
 
-const password = 'ujultimuate'; // your desired password
+const password = ''; // your desired password
 const saltRounds = 12; // recommended
 
 bcrypt.hash(password, saltRounds, (err, hash) => {

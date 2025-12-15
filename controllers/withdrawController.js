@@ -398,7 +398,6 @@ async function initiateWithdraw(req, res) {
       .json({ status: false, message: 'Withdrawal initiation failed' });
   }
 }
-
 /**
  * ---------------------------------------------------------
  * CONFIRM WITHDRAWAL
@@ -409,19 +408,9 @@ async function confirmWithdraw(req, res) {
   const userId = user.id;
   const { reference, otp } = req.body || {};
 
-  console.log(
-    'withdrawController.confirmWithdraw › user:',
-    userId,
-    'reference:',
-    reference
-  );
-
   try {
     if (!reference || !otp) {
-      return res.status(400).json({
-        status: false,
-        message: 'Reference and OTP required'
-      });
+      return res.status(400).json({ status: false, message: 'Reference and OTP required' });
     }
 
     const [rows] = await pool.query(
@@ -430,46 +419,33 @@ async function confirmWithdraw(req, res) {
     );
 
     if (!rows.length) {
-      return res
-        .status(404)
-        .json({ status: false, message: 'Request not found' });
+      return res.status(404).json({ status: false, message: 'Request not found' });
     }
 
     const wr = rows[0];
 
     if (wr.status !== 'pending') {
-      return res.status(400).json({
-        status: false,
-        message: 'Withdrawal is no longer pending'
-      });
+      return res.status(400).json({ status: false, message: 'Withdrawal is no longer pending' });
     }
 
     const meta = wr.metadata ? JSON.parse(wr.metadata) : {};
     const otpHash = meta.otp_hash;
-    const otpExpiresAt = meta.otp_expires_at
-      ? new Date(meta.otp_expires_at)
-      : null;
+    const otpExpiresAt = meta.otp_expires_at ? new Date(meta.otp_expires_at) : null;
 
     if (!otpHash || !otpExpiresAt) {
-      return res
-        .status(400)
-        .json({ status: false, message: 'OTP missing for this request' });
+      return res.status(400).json({ status: false, message: 'OTP missing for this request' });
     }
 
     if (new Date() > otpExpiresAt) {
-      return res
-        .status(400)
-        .json({ status: false, message: 'OTP expired' });
+      return res.status(400).json({ status: false, message: 'OTP expired' });
     }
 
     const match = await bcrypt.compare(String(otp), otpHash);
     if (!match) {
-      return res
-        .status(400)
-        .json({ status: false, message: 'Invalid OTP' });
+      return res.status(400).json({ status: false, message: 'Invalid OTP' });
     }
 
-    // Debit wallet in transaction
+    // ---------------- TRANSACTION ----------------
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
@@ -481,128 +457,84 @@ async function confirmWithdraw(req, res) {
 
       if (!walletRows.length) {
         await conn.rollback();
-        conn.release();
-        return res
-          .status(400)
-          .json({ status: false, message: 'Wallet not found' });
+        return res.status(400).json({ status: false, message: 'Wallet not found' });
       }
 
       const wallet = walletRows[0];
+      const amount = Number(wr.amount);
+      const fee = Number(wr.fee || 0);
 
-      if (Number(wallet.balance) < Number(wr.amount)) {
+      if (wallet.balance < amount) {
         await conn.rollback();
-        conn.release();
-        return res
-          .status(400)
-          .json({ status: false, message: 'Insufficient balance' });
+        return res.status(400).json({ status: false, message: 'Insufficient balance' });
       }
 
       const balanceBefore = Number(wallet.balance);
+      const payoutAmount = amount - fee; // ✅ EXPLICIT
 
-      await walletService.debitUserWallet(conn, userId, wr.amount, 'withdrawal');
+      // Debit FULL amount (correct)
+      await walletService.debitUserWallet(conn, userId, amount, 'withdrawal');
 
       const [[walletAfter]] = await conn.query(
         'SELECT balance FROM wallets WHERE id = ? LIMIT 1',
         [wallet.id]
       );
 
+      // Persist payout math safely
       await conn.query(
         `UPDATE withdrawal_requests
          SET status = 'processing',
              balance_before = ?,
              balance_after = ?,
              processed_at = NOW(),
-             metadata = JSON_SET(IFNULL(metadata, '{}'), '$.otp_verified_at', NOW())
+             metadata = JSON_SET(
+               IFNULL(metadata, '{}'),
+               '$.otp_verified_at', NOW(),
+               '$.payout_amount', ?,
+               '$.fee', ?
+             )
          WHERE id = ?`,
-        [balanceBefore, walletAfter.balance, wr.id]
+        [balanceBefore, walletAfter.balance, payoutAmount, fee, wr.id]
       );
 
-      try {
-        await auditLog(
-          null,
-          userId,
-          'WITHDRAW_CONFIRMED',
-          'withdrawal_requests',
-          wr.id,
-          { reference }
-        );
-      } catch (e) {
-        console.warn('withdrawController.confirmWithdraw › auditLog failed', e);
-      }
-
-      // Create withdrawal slip (best-effort)
-      try {
-        const [[userRow]] = await pool.query(
-          'SELECT username FROM users WHERE id = ? LIMIT 1',
-          [wr.user_id]
-        );
-
-        const maskedAccount = wr.account_number
-          ? wr.account_number
-              .slice(-4)
-              .padStart(wr.account_number.length, '*')
-          : null;
-
-        const payload = {
-          amount: Number(wr.amount),
-          bank_name: wr.bank_name || null,
-          bank_account: maskedAccount,
-          provider: 'manual', // manual payout engine
-          reference: wr.reference,
-          user_masked: userRow?.username
-            ? userRow.username.length <= 2
-              ? `${userRow.username[0]}*`
-              : `${userRow.username.slice(0, 3)}***`
-            : 'user',
-          created_at: new Date().toISOString()
-        };
-
-        await slipService.createSlip(wr.user_id, 'withdrawal', payload);
-      } catch (e) {
-        logger && logger.warn && logger.warn('createSlip withdrawal failed', e);
-      }
+      await auditLog(
+        null,
+        userId,
+        'WITHDRAW_CONFIRMED',
+        'withdrawal_requests',
+        wr.id,
+        { reference, amount, fee, payout_amount: payoutAmount }
+      );
 
       await conn.commit();
-      try {
-  await notify({
-    userId,
-    email: user.email,
-    title: 'Withdrawal Processing',
-    message: `Your withdrawal of ₦${Number(wr.amount).toLocaleString()} is now being processed.\n\nReference: ${wr.reference}`,
-    type: 'withdrawal',
-    severity: 'info',
-    metadata: {
-      reference: wr.reference,
-      amount: Number(wr.amount),
-      status: 'processing'
-    }
-  });
-} catch (nErr) {
-  console.warn('withdraw confirm notify failed', nErr);
-}
-
       conn.release();
 
-      return res.json({
-        status: true,
-        message: 'Withdrawal is now processing'
-      });
+      // 🔔 Unified notify (post-commit)
+      try {
+        await notify({
+          userId,
+          email: user.email,
+          title: 'Withdrawal Processing',
+          message: `Your withdrawal of ₦${amount.toLocaleString()} is now processing.\nYou will receive ₦${payoutAmount.toLocaleString()} after fees.`,
+          type: 'withdrawal',
+          severity: 'info',
+          metadata: { reference, amount, fee, payout_amount: payoutAmount }
+        });
+      } catch (nErr) {
+        console.warn('withdraw confirm notify failed', nErr);
+      }
+
+      return res.json({ status: true, message: 'Withdrawal is now processing' });
+
     } catch (txErr) {
-      console.error(
-        'withdrawController.confirmWithdraw › TX ERROR:',
-        txErr
-      );
       await conn.rollback();
       conn.release();
-      return res
-        .status(500)
-        .json({ status: false, message: 'Could not confirm withdrawal' });
+      throw txErr;
     }
+
   } catch (err) {
     console.error('❌ withdrawController.confirmWithdraw ERROR:', err);
-    return res
-      .status(500)
-      .json({ status: false, message: 'Withdrawal confirmation failed' });
+    return res.status(500).json({ status: false, message: 'Withdrawal confirmation failed' });
   }
 }
 

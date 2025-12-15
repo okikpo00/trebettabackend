@@ -1,37 +1,84 @@
 // utils/sendEmail.js
-const nodemailer = require("nodemailer");
+const nodemailer = require('nodemailer');
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: process.env.SMTP_PORT || 465,
-  secure: true, // true for 465, false for other ports
-  auth: {
-    user: process.env.SMTP_USER, // e.g. your company noreply email
-    pass: process.env.SMTP_PASS,
-  },
-});
+let transporter;
 
 /**
- * Send email with dynamic subject, HTML, and fallback text
- * @param {string} to - recipient email
- * @param {string} subject - email subject
- * @param {string} html - HTML body
- * @param {string} [text] - optional plain text fallback
+ * Lazy-create transporter so app doesn't crash on boot
+ * if email config is missing in some environments.
  */
-async function sendEmail(to, subject, html, text = "") {
+function getTransporter() {
+  if (transporter) return transporter;
+
+  const {
+    MAIL_HOST,
+    MAIL_PORT,
+    MAIL_USER,
+    MAIL_PASS
+  } = process.env;
+
+  if (!MAIL_HOST || !MAIL_PORT || !MAIL_USER || !MAIL_PASS) {
+    console.warn('⚠️ Email not configured properly (MAIL_* env missing)');
+    return null;
+  }
+
+  transporter = nodemailer.createTransport({
+    host: MAIL_HOST,                 // smtp-relay.brevo.com
+    port: Number(MAIL_PORT),          // 587
+    secure: Number(MAIL_PORT) === 465, // false for 587, true for 465
+    auth: {
+      user: MAIL_USER,               // 9e0647001@smtp-brevo.com
+      pass: MAIL_PASS                // Brevo SMTP password
+    },
+    pool: true,                      // production-safe
+    maxConnections: 5,
+    maxMessages: 100
+  });
+
+  return transporter;
+}
+
+/**
+ * ---------------------------------------------------------
+ * SEND EMAIL (Transactional)
+ *
+ * @param {string} to      - recipient email
+ * @param {string} subject - email subject
+ * @param {string} html    - HTML body
+ * @param {string} [text] - optional plain text fallback
+ * ---------------------------------------------------------
+ */
+async function sendEmail(to, subject, html, text = '') {
   try {
+    if (!to) {
+      console.warn('⚠️ sendEmail skipped: recipient missing');
+      return;
+    }
+
+    const transporter = getTransporter();
+    if (!transporter) return;
+
+    const from =
+      process.env.MAIL_FROM ||
+      `Trebetta <${process.env.MAIL_USER}>`;
+
     const mailOptions = {
-      from: process.env.MAIL_FROM || `"Trebetta" <${process.env.SMTP_USER}>`,
+      from,
       to,
       subject,
       html,
-      text,
+      text: text || html.replace(/<[^>]+>/g, '') // auto fallback
     };
 
-    await transporter.sendMail(mailOptions);
-    console.log(`📧 Email sent to ${to}: ${subject}`);
-  } catch (error) {
-    console.error("❌ Email send error:", error.message);
+    const info = await transporter.sendMail(mailOptions);
+
+    console.log(`📧 Email sent → ${to} (${info.messageId})`);
+  } catch (err) {
+    console.error('❌ Email send failed:', {
+      to,
+      subject,
+      error: err.message
+    });
   }
 }
 
