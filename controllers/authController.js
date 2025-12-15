@@ -126,7 +126,7 @@ exports.register = async (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, 'user', 'active', 0, 0,'regular', NOW(), NOW())`;
 
     const [result] = await conn.execute(insertUserQ, [
-      uname,
+      username,
       usernameLower,
       first_name || null,
       last_name || null,
@@ -146,7 +146,14 @@ exports.register = async (req, res) => {
       [userId, tokenHash, expires]
     );
 
-    await auditLog(conn, userId, 'REGISTER', 'user', userId, { email: emailNorm, username: uname });
+  await auditLog(
+  null,            // adminId (none)
+  userId,          // userId
+  'REGISTER',
+  'user',
+  userId,
+  { email: emailNorm, username: uname }
+);
 
     await conn.commit();
 
@@ -196,7 +203,14 @@ exports.verifyEmail = async (req, res) => {
       await conn.beginTransaction();
       await conn.execute('UPDATE users SET is_email_verified = 1, updated_at = NOW() WHERE id = ?', [userId]);
       await conn.execute('UPDATE verification_tokens SET used = 1 WHERE id = ?', [rec.id]);
-      await auditLog(conn, userId, 'VERIFY_EMAIL', 'user', userId, { via: 'token' });
+      await auditLog(
+  null,          // adminId
+  userId,
+  'VERIFY_EMAIL',
+  'user',
+  userId,
+  { via: 'token' }
+);
       await conn.commit();
 await notify({
   userId,
