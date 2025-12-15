@@ -157,7 +157,7 @@ exports.register = async (req, res) => {
 
     await conn.commit();
 
-    const verifyUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-email?token=${rawVerifyToken}`;
+    const verifyUrl = `${process.env.FRONTEND_URL || 'https://trebetta.com'}/verify-email?token=${rawVerifyToken}`;
     await notify({
   userId,
   email: emailNorm,
