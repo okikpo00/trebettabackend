@@ -22,8 +22,8 @@ function maskUsername(u) {
  * listPools - open pools for homepage (cached)
 */
 
-const TARGET_PULSE = Number(process.env.TARGET_PULSE || 500000);
-const TARGET_GRAND = Number(process.env.TARGET_GRAND || 1000000);
+const TARGET_PULSE = Number(process.env.TARGET_PULSE || 20000);
+const TARGET_GRAND = Number(process.env.TARGET_GRAND || 50000);
 
 /**
  * listPools - open + locked pools for homepage (cached)
@@ -71,9 +71,9 @@ async function listPools({ type = null, page = 1, limit = 20, search = null } = 
     const total = Number(r.total_stake || r.total_pool_amount || 0);
     const target =
       r.type === 'pulse'
-        ? Number(process.env.PULSE_TARGET || 500000)
+        ? Number(process.env.PULSE_TARGET || 20000)
         : r.type === 'grand'
-        ? Number(process.env.GRAND_TARGET || 1000000)
+        ? Number(process.env.GRAND_TARGET || 50000)
         : 0;
 
     const progress = target > 0 ? Math.min(1, total / target) : 0;
@@ -145,9 +145,9 @@ async function getPoolDetails(poolId, userId = null) {
     // --- TARGET (dynamic by pool type)
     let target = 0;
     if (poolRow.type === "pulse") {
-      target = Number(process.env.TARGET_PULSE || 500000);
+      target = Number(process.env.TARGET_PULSE || 20000);
     } else if (poolRow.type === "grand") {
-      target = Number(process.env.TARGET_GRAND || 1000000);
+      target = Number(process.env.TARGET_GRAND || 50000);
     }
 
     // --- OPTIONS

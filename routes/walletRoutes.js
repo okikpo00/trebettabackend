@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 
 const depositController = require('../controllers/depositController');
+const flutterwaveController = require('../controllers/flutterwaveController');
 const withdrawController = require('../controllers/withdrawController');
 const walletController = require('../controllers/walletController');
 
@@ -26,6 +27,13 @@ router.get('/fees', auth, walletController.getWithdrawalFees);
 // Deposits (manual/semi-auto)
 router.post('/deposit/initiate', auth, depositController.initiateDeposit);
 router.get('/deposit/pending', auth, depositController.getPendingDeposit);
+// Flutterwave
+router.post(
+  '/deposit/flutterwave/initiate',
+  auth,
+  flutterwaveController.initiateFlutterwaveDeposit
+);
+
 
 
 // PIN ROUTES

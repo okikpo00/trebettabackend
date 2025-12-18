@@ -53,6 +53,7 @@ const bankAlertRoutes = require('./routes/bankAlertRoutes');
 const adminDepositMatchRoutes = require('./routes/adminDepositMatchRoutes');
 const publicRoutes = require('./routes/publicRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const webhookRoutes = require('./routes/webhookRoutes');
 const app = express();
 
 // CORS config
@@ -118,11 +119,14 @@ app.get('/api/health', async (req, res) => {
     res.status(500).json({ ok: false, db: 'down', error: err.message });
   }
 });
-
-// NOTE: These must come before JSON body parsing (already handled above)
-app.post('/webhook/flutterwave', webhookController.flutterwaveWebhook);
-app.post('/webhook/paystack', webhookController.paystackWebhook);
-
+app.get('/flutterwave/redirect', (req, res) => {
+  return res.send('Payment processing, you can close this page.');
+});
+app.post(
+  '/api/webhooks/flutterwave',
+  express.raw({ type: 'application/json' }),
+  webhookController.flutterwaveWebhook
+);
 
 // mount routes (these are safe placeholders for now)
 app.use('/api/auth', authRoutes);
@@ -160,7 +164,7 @@ app.use('/api/internal/bank', bankAlertRoutes);
 app.use('/api/admin/deposits', adminDepositMatchRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/public', publicRoutes);
-
+app.use('/api/webhooks', webhookRoutes);
 app.use('/api/admin', adminApiLimiter);
 
 
