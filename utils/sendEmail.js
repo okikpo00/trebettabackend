@@ -1,36 +1,36 @@
-// utils/sendEmail.js
 const nodemailer = require('nodemailer');
 
-let transporter;
+let transporter = null;
 
 /**
- * Lazy-create transporter so app doesn't crash on boot
- * if email config is missing in some environments.
+ * ---------------------------------------------------------
+ * Get SMTP transporter (lazy init, production-safe)
+ * ---------------------------------------------------------
  */
 function getTransporter() {
+  // Reuse existing transporter if already created
   if (transporter) return transporter;
 
-  const {
-    MAIL_HOST,
-    MAIL_PORT,
-    MAIL_USER,
-    MAIL_PASS
-  } = process.env;
+  const host = process.env.MAIL_HOST;
+  const port = Number(process.env.MAIL_PORT);
+  const user = process.env.MAIL_USER;
+  const pass = process.env.MAIL_PASS;
 
-  if (!MAIL_HOST || !MAIL_PORT || !MAIL_USER || !MAIL_PASS) {
+  // Validate env configuration at runtime
+  if (!host || !port || !user || !pass) {
     console.warn('⚠️ Email not configured properly (MAIL_* env missing)');
     return null;
   }
 
   transporter = nodemailer.createTransport({
-    host: MAIL_HOST,                 // smtp-relay.brevo.com
-    port: Number(MAIL_PORT),          // 587
-    secure: Number(MAIL_PORT) === 465, // false for 587, true for 465
+    host,
+    port,
+    secure: port === 465, // true only for 465, false for 587 (Brevo)
     auth: {
-      user: MAIL_USER,               // 9e0647001@smtp-brevo.com
-      pass: MAIL_PASS                // Brevo SMTP password
+      user,
+      pass
     },
-    pool: true,                      // production-safe
+    pool: true,          // production-safe pooling
     maxConnections: 5,
     maxMessages: 100
   });
@@ -42,10 +42,10 @@ function getTransporter() {
  * ---------------------------------------------------------
  * SEND EMAIL (Transactional)
  *
- * @param {string} to      - recipient email
- * @param {string} subject - email subject
- * @param {string} html    - HTML body
- * @param {string} [text] - optional plain text fallback
+ * @param {string} to      Recipient email
+ * @param {string} subject Email subject
+ * @param {string} html    HTML body
+ * @param {string} [text]  Optional plain-text fallback
  * ---------------------------------------------------------
  */
 async function sendEmail(to, subject, html, text = '') {
@@ -55,8 +55,8 @@ async function sendEmail(to, subject, html, text = '') {
       return;
     }
 
-    const transporter = getTransporter();
-    if (!transporter) return;
+    const mailer = getTransporter();
+    if (!mailer) return; // Email not configured, fail silently
 
     const from =
       process.env.MAIL_FROM ||
@@ -67,10 +67,10 @@ async function sendEmail(to, subject, html, text = '') {
       to,
       subject,
       html,
-      text: text || html.replace(/<[^>]+>/g, '') // auto fallback
+      text: text || html.replace(/<[^>]+>/g, '') // auto text fallback
     };
 
-    const info = await transporter.sendMail(mailOptions);
+    const info = await mailer.sendMail(mailOptions);
 
     console.log(`📧 Email sent → ${to} (${info.messageId})`);
   } catch (err) {

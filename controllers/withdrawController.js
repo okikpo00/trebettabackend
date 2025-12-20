@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const generateReference = require('../utils/generateReference');
 const { auditLog } = require('../utils/auditLog');
 const notify = require('../utils/notify');
-
+const sendEmail = require('../utils/sendEmail');
 const limits = require('../utils/limits');
 const walletService = require('../services/walletService');
 const slipService = require('../services/slipService');
@@ -325,33 +325,46 @@ async function initiateWithdraw(req, res) {
     );
 
     // Send OTP email (best-effort)
-    try {
-     try {
-  await notify({
-    userId,
-    email: user.email,
-    title: 'Withdrawal OTP Sent',
-    message: `You initiated a withdrawal of ₦${parsedAmount.toLocaleString()}.\n\nYour OTP is ${otp}.\nIt expires in ${WITHDRAWAL_EXPIRE_MIN} minutes.\n\nReference: ${reference}`,
-    type: 'withdrawal',
-    severity: 'warning',
-    metadata: {
-      reference,
-      amount: parsedAmount,
-      fee,
-      bank_code: finalBankCode,
-      account_number: finalAccountNumber?.slice(-4)
-    }
-  });
-} catch (nErr) {
-  console.warn('withdraw initiate notify failed', nErr);
-}
+   // 🔔 Fire-and-forget notification (must NEVER block withdrawal)
+// 🔔 Side effects (SAFE)
+setImmediate(async () => {
+  // 📧 EMAIL ONLY (OTP ALLOWED)
+  try {
+    await sendEmail(
+      user.email,
+      'Trebetta Withdrawal OTP',
+      `
+        <p>You initiated a withdrawal of ₦${parsedAmount.toLocaleString()}.</p>
+        <p><strong>Your OTP is: ${otp}</strong></p>
+        <p>This code expires in ${WITHDRAWAL_EXPIRE_MIN} minutes.</p>
+        <p>Reference: ${reference}</p>
+      `
+    );
+  } catch (err) {
+    console.warn('Withdrawal OTP email failed:', err?.message);
+  }
 
-    } catch (emailErr) {
-      console.error(
-        'withdrawController.initiateWithdraw › OTP email error:',
-        emailErr
-      );
-    }
+  // 🔔 In-app notification (NO OTP)
+  try {
+    await notify({
+      userId,
+      email: null, // 👈 email already sent
+      title: 'Withdrawal OTP Sent',
+      message: 'A withdrawal OTP has been sent to your email.',
+      type: 'withdrawal',
+      severity: 'warning',
+      metadata: {
+        reference,
+        amount: parsedAmount,
+        fee,
+        bank_code: finalBankCode,
+        account_number: finalAccountNumber?.slice(-4)
+      }
+    });
+  } catch (err) {
+    console.warn('Withdrawal notify failed:', err?.message);
+  }
+});
 
     // Proper auditLog (adminId, userId, action, entity, entityId, details)
     try {
@@ -428,7 +441,21 @@ async function confirmWithdraw(req, res) {
       return res.status(400).json({ status: false, message: 'Withdrawal is no longer pending' });
     }
 
-    const meta = wr.metadata ? JSON.parse(wr.metadata) : {};
+    let meta = {};
+
+if (wr.metadata) {
+  if (typeof wr.metadata === 'string') {
+    try {
+      meta = JSON.parse(wr.metadata);
+    } catch (e) {
+      console.warn('withdrawController.confirmWithdraw › invalid metadata JSON', e);
+      meta = {};
+    }
+  } else if (typeof wr.metadata === 'object') {
+    meta = wr.metadata;
+  }
+}
+
     const otpHash = meta.otp_hash;
     const otpExpiresAt = meta.otp_expires_at ? new Date(meta.otp_expires_at) : null;
 
@@ -729,6 +756,11 @@ async function verifyPin(req, res) {
  * ---------------------------------------------------------
  * REQUEST PIN RESET (user provides password)
  * ---------------------------------------------------------
+ *//**
+/**
+ * ---------------------------------------------------------
+ * REQUEST PIN RESET (EMAIL OTP ONLY)
+ * ---------------------------------------------------------
  */
 async function requestPinReset(req, res) {
   const user = req.user;
@@ -738,6 +770,7 @@ async function requestPinReset(req, res) {
   console.log('withdrawController.requestPinReset › user:', userId);
 
   try {
+    // 1️⃣ Validate input
     if (!password) {
       return res.status(400).json({
         status: false,
@@ -745,41 +778,56 @@ async function requestPinReset(req, res) {
       });
     }
 
+    // 2️⃣ Fetch password + existing OTP expiry
     const [rows] = await pool.query(
-      `SELECT password_hash FROM users WHERE id = ? LIMIT 1`,
+      `SELECT password_hash, pin_reset_otp_expiry
+       FROM users
+       WHERE id = ? LIMIT 1`,
       [userId]
     );
 
     if (!rows.length) {
-      return res
-        .status(404)
-        .json({ status: false, message: 'User not found' });
-    }
-
-    const storedHash = rows[0].password_hash;
-
-    if (!storedHash) {
-      return res.status(500).json({
+      return res.status(404).json({
         status: false,
-        message: 'Password not set for this account. Contact support.'
+        message: 'User not found'
       });
     }
 
-    const ok = await bcrypt.compare(
-      String(password),
-      String(storedHash)
-    );
+    const { password_hash, pin_reset_otp_expiry } = rows[0];
 
-    if (!ok) {
-      return res
-        .status(400)
-        .json({ status: false, message: 'Incorrect password' });
+    if (!password_hash) {
+      return res.status(400).json({
+        status: false,
+        message: 'Password not set for this account'
+      });
     }
 
+    // 3️⃣ Verify password
+    const ok = await bcrypt.compare(String(password), String(password_hash));
+    if (!ok) {
+      return res.status(400).json({
+        status: false,
+        message: 'Incorrect password'
+      });
+    }
+
+    // 🚫 4️⃣ BLOCK MULTIPLE ACTIVE OTPs (THIS WAS THE BUG)
+    if (
+      pin_reset_otp_expiry &&
+      new Date() < new Date(pin_reset_otp_expiry)
+    ) {
+      return res.status(400).json({
+        status: false,
+        message: 'An OTP was already sent. Please check your email.'
+      });
+    }
+
+    // 5️⃣ Generate OTP
     const otp = Math.floor(100000 + Math.random() * 900000);
     const otpHash = await bcrypt.hash(String(otp), 10);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
+    // 6️⃣ Persist OTP (CRITICAL)
     await pool.query(
       `UPDATE users
        SET pin_reset_otp_hash = ?, pin_reset_otp_expiry = ?
@@ -787,41 +835,72 @@ async function requestPinReset(req, res) {
       [otpHash, expiresAt, userId]
     );
 
-    try {
-  await notify({
-    userId,
-    email: user.email,
-    title: 'PIN Reset OTP Sent',
-    message: `You requested to reset your transaction PIN.\n\nYour OTP is ${otp}. It expires in 10 minutes.`,
-    type: 'security',
-    severity: 'warning',
-    metadata: { action: 'pin_reset_requested' }
-  });
-} catch (e) {
-  console.warn('PIN reset request notify failed', e);
-}
-
-
-    await auditLog(
-      null,
-      userId,
-      'PIN_RESET_REQUESTED',
-      'transaction_pin',
-      null,
-      { message: 'User requested PIN reset' }
-    );
-
-    return res.json({
+    // ✅ 7️⃣ RESPOND IMMEDIATELY (UI NEVER FAILS)
+    res.json({
       status: true,
       message: 'PIN reset OTP sent to your email'
     });
+
+    // -------------------------------------------------
+    // 🔔 8️⃣ FIRE-AND-FORGET (EMAIL + NOTIFY)
+    // -------------------------------------------------
+    setImmediate(async () => {
+      // 📧 EMAIL (OTP ONLY HERE)
+      try {
+        await sendEmail(
+          user.email,
+          'Trebetta PIN Reset OTP',
+          `
+            <p>You requested to reset your transaction PIN.</p>
+            <p><strong>Your OTP is: ${otp}</strong></p>
+            <p>This code expires in 10 minutes.</p>
+            <p>If this wasn’t you, contact Trebetta support immediately.</p>
+          `
+        );
+      } catch (e) {
+        console.warn('PIN reset OTP email failed (ignored):', e?.message);
+      }
+
+      // 🔔 In-app notification (NO OTP)
+      try {
+        await notify({
+          userId,
+          email: null,
+          title: 'PIN Reset Requested',
+          message: 'A PIN reset was requested. Check your email for the OTP.',
+          type: 'security',
+          severity: 'warning',
+          metadata: {
+            action: 'pin_reset_requested',
+            expires_at: expiresAt.toISOString()
+          }
+        });
+      } catch (e) {
+        console.warn('PIN reset notify failed (ignored):', e?.message);
+      }
+
+      // 🧾 Audit log (best effort)
+      try {
+        await auditLog(
+          null,
+          userId,
+          'PIN_RESET_REQUESTED',
+          'users',
+          userId,
+          {}
+        );
+      } catch {}
+    });
+
   } catch (err) {
     console.error('❌ requestPinReset ERROR:', err);
-    return res
-      .status(500)
-      .json({ status: false, message: 'Could not request PIN reset' });
+    return res.status(500).json({
+      status: false,
+      message: 'Could not request PIN reset'
+    });
   }
 }
+
 
 /**
  * ---------------------------------------------------------
@@ -909,18 +988,18 @@ async function resetPin(req, res) {
       { message: 'PIN reset successfully' }
     );
 try {
-  await notify({
+  await auditLog(
+    null,
     userId,
-    email: user.email,
-    title: 'Transaction PIN Reset',
-    message: 'Your transaction PIN was reset successfully.',
-    type: 'security',
-    severity: 'success',
-    metadata: { action: 'pin_reset_completed' }
-  });
+    'PIN_RESET_COMPLETED',
+    'users',
+    userId, // ✅ NEVER NULL
+    { action: 'pin_reset_completed' }
+  );
 } catch (e) {
-  console.warn('PIN reset complete notify failed', e);
+  console.warn('PIN_RESET_COMPLETED auditLog failed:', e.message);
 }
+
 
     return res.json({
       status: true,
