@@ -38,7 +38,7 @@ const adminPoolOptionRoutes = require('./routes/adminPoolOptionRoutes');
 const rolloverRoutes = require('./routes/rolloverRoutes');
 const adminBillboardRoutes = require('./routes/adminBillboardRoutes');
 const walletRoutes = require('./routes/walletRoutes'); // your wallet routes
-const webhookController = require('./controllers/webhookController');
+
 const homeRoutes = require('./routes/homeRoutes');
 const adminDashboardRoutes = require('./routes/adminDashboardRoutes');
 const userBillboardRoutes = require('./routes/userBillboardRoutes');
@@ -122,10 +122,13 @@ app.get('/api/health', async (req, res) => {
 app.get('/flutterwave/redirect', (req, res) => {
   return res.send('Payment processing, you can close this page.');
 });
+const flutterwaveWebhookController =
+  require('./controllers/flutterwaveWebhookController');
+
 app.post(
   '/api/webhooks/flutterwave',
   express.raw({ type: 'application/json' }),
-  webhookController.flutterwaveWebhook
+  flutterwaveWebhookController.flutterwaveWebhook
 );
 
 // mount routes (these are safe placeholders for now)
