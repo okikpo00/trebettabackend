@@ -448,46 +448,81 @@ exports.logout = async (req, res) => {
 // ---------------------
 // Forgot Password
 // ---------------------
+// ---------------------
+// Forgot Password
+// ---------------------
 exports.forgotPassword = async (req, res) => {
   const { email } = req.body || {};
-  if (!email) return res.status(400).json({ success: false, message: 'Email required' });
+
+  if (!email) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email required'
+    });
+  }
 
   const emailNorm = normalizeEmail(email);
+
   try {
-    const [rows] = await pool.query('SELECT id, first_name, last_name FROM users WHERE email = ? LIMIT 1', [emailNorm]);
-    if (!rows.length) return res.json({ success: true, message: 'If account exists, reset link will be sent' });
+    const [rows] = await pool.query(
+      'SELECT id FROM users WHERE email = ? LIMIT 1',
+      [emailNorm]
+    );
+
+    // Always return success (security best practice)
+    if (!rows.length) {
+      return res.json({
+        success: true,
+        message: 'If account exists, reset link will be sent'
+      });
+    }
 
     const user = rows[0];
+
     const rawToken = crypto.randomBytes(32).toString('hex');
     const tokenHash = hashToken(rawToken);
     const expires = nowPlusMinutes(PASSWORD_RESET_EXPIRES_MIN);
 
-    await pool.query('INSERT INTO reset_tokens (user_id, token_hash, expires_at, used, created_at) VALUES (?, ?, ?, 0, NOW())', [
-      user.id,
-      tokenHash,
-      expires
-    ]);
+    await pool.query(
+      `INSERT INTO reset_tokens
+       (user_id, token_hash, expires_at, used, created_at)
+       VALUES (?, ?, ?, 0, NOW())`,
+      [user.id, tokenHash, expires]
+    );
 
-    const link = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${rawToken}`;
-await notify({
-  userId: user.id,
-  email: emailNorm,
-  title: 'Password Reset Requested',
-  message: `A password reset was requested for your account.\n\nReset link: ${link}\n\nIf this wasn’t you, please secure your account immediately.`,
-  type: 'security',
-  severity: 'warning',
-  metadata: {
-    action: 'password_reset_request',
-    reset_link: link
-  }
-});
+    const link = `${
+      process.env.FRONTEND_URL || 'https://trebetta.com'
+    }/reset-password?token=${rawToken}`;
 
+    // Notify user
+    await notify({
+      userId: user.id,
+      email: emailNorm,
+      title: 'Password Reset Requested',
+      message:
+        `A password reset was requested for your account.\n\n` +
+        `Reset link: ${link}\n\n` +
+        `If this wasn’t you, please secure your account immediately.`,
+      type: 'security',
+      severity: 'warning',
+      metadata: {
+        action: 'password_reset_request',
+        reset_link: link
+      }
+    });
 
     await auditLog(null, user.id, 'FORGOT_PASSWORD', 'user', user.id, {});
-    return res.json({ success: true, message: 'If account exists, reset link sent (check email)' });
+
+    return res.json({
+      success: true,
+      message: 'If account exists, reset link sent (check email)'
+    });
   } catch (err) {
     console.error('forgot err', err);
-    return res.status(500).json({ success: false, message: 'Server error', error: err.message });
+    return res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
   }
 };
 
@@ -496,41 +531,100 @@ await notify({
 // ---------------------
 exports.resetPassword = async (req, res) => {
   const { token, password } = req.body || {};
-  if (!token || !password) return res.status(400).json({ success: false, message: 'Token and password required' });
+
+  if (!token || !password) {
+    return res.status(400).json({
+      success: false,
+      message: 'Token and password required'
+    });
+  }
 
   if (!isPasswordStrong(password)) {
-    return res.status(400).json({ success: false, message: 'Password must be at least 8 chars, include letters and numbers, optionally symbols' });
+    return res.status(400).json({
+      success: false,
+      message:
+        'Password must be at least 8 chars, include letters and numbers, optionally symbols'
+    });
   }
 
   try {
     const tokenHash = hashToken(token);
-    const [rows] = await pool.query('SELECT * FROM reset_tokens WHERE token_hash = ? AND used = 0 AND expires_at >= NOW() LIMIT 1', [tokenHash]);
-    if (!rows.length) return res.status(400).json({ success: false, message: 'Invalid or expired token' });
+
+    const [rows] = await pool.query(
+      `SELECT id, user_id
+       FROM reset_tokens
+       WHERE token_hash = ?
+         AND used = 0
+         AND expires_at >= NOW()
+       LIMIT 1`,
+      [tokenHash]
+    );
+
+    if (!rows.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired token'
+      });
+    }
 
     const rec = rows[0];
-    const passHash = await bcrypt.hash(password, Number(process.env.BCRYPT_ROUNDS || 12));
+    const passwordHash = await bcrypt.hash(
+      password,
+      Number(process.env.BCRYPT_ROUNDS || 12)
+    );
 
-    await pool.query('UPDATE users SET password_hash = ? WHERE id = ?', [passHash, rec.user_id]);
-    await pool.query('UPDATE reset_tokens SET used = 1 WHERE id = ?', [rec.id]);
+    // Update password
+    await pool.query(
+      'UPDATE users SET password_hash = ?, updated_at = NOW() WHERE id = ?',
+      [passwordHash, rec.user_id]
+    );
 
-    // Revoke old refresh tokens for multi-device safety
-    await pool.query('UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?', [rec.user_id]);
-await notify({
-  userId: rec.user_id,
-  email: user.email,
-  title: 'Password Reset Successful',
-  message: 'Your password has been reset successfully. If this wasn’t you, please contact support immediately.',
-  type: 'security',
-  severity: 'success',
-  metadata: {
-    action: 'password_reset_complete'
-  }
-});
+    // Mark token used
+    await pool.query(
+      'UPDATE reset_tokens SET used = 1 WHERE id = ?',
+      [rec.id]
+    );
+
+    // Revoke refresh tokens (security)
+    await pool.query(
+      'UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?',
+      [rec.user_id]
+    );
+
+    // Fetch user email for notification
+    const [[user]] = await pool.query(
+      'SELECT email FROM users WHERE id = ? LIMIT 1',
+      [rec.user_id]
+    );
+
+    // Notify user (best effort)
+    if (user?.email) {
+      await notify({
+        userId: rec.user_id,
+        email: user.email,
+        title: 'Password Reset Successful',
+        message:
+          'Your password has been reset successfully.\n\n' +
+          'If this wasn’t you, please contact support immediately.',
+        type: 'security',
+        severity: 'success',
+        metadata: {
+          action: 'password_reset_complete'
+        }
+      });
+    }
 
     await auditLog(null, rec.user_id, 'RESET_PASSWORD', 'user', rec.user_id, {});
-    return res.json({ success: true, message: 'Password reset successful' });
+
+    return res.json({
+      success: true,
+      message: 'Password reset successful'
+    });
   } catch (err) {
     console.error('reset err', err);
-    return res.status(500).json({ success: false, message: 'Server error', error: err.message });
+    return res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
   }
 };
