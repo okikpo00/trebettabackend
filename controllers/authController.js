@@ -184,58 +184,109 @@ exports.register = async (req, res) => {
 // ---------------------
 // Email Verification
 // ---------------------
+// ---------------------
+// Email Verification
+// ---------------------
 exports.verifyEmail = async (req, res) => {
   const { token } = req.body || {};
-  if (!token) return res.status(400).json({ success: false, message: 'Token required' });
+
+  if (!token) {
+    return res.status(400).json({
+      success: false,
+      message: 'Token required'
+    });
+  }
 
   try {
     const tokenHash = hashToken(token);
+
     const [rows] = await pool.query(
-      'SELECT * FROM verification_tokens WHERE token_hash = ? AND used = 0 AND expires_at >= NOW() LIMIT 1',
+      `SELECT id, user_id
+       FROM verification_tokens
+       WHERE token_hash = ?
+         AND used = 0
+         AND expires_at >= NOW()
+       LIMIT 1`,
       [tokenHash]
     );
-    if (!rows.length) return res.status(400).json({ success: false, message: 'Invalid or expired token' });
+
+    if (!rows.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired token'
+      });
+    }
 
     const rec = rows[0];
     const userId = rec.user_id;
+
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
-      await conn.execute('UPDATE users SET is_email_verified = 1, updated_at = NOW() WHERE id = ?', [userId]);
-      await conn.execute('UPDATE verification_tokens SET used = 1 WHERE id = ?', [rec.id]);
-      await auditLog(
-  null,          // adminId
-  userId,
-  'VERIFY_EMAIL',
-  'user',
-  userId,
-  { via: 'token' }
-);
-      await conn.commit();
-await notify({
-  userId,
-  email: user.email,
-  title: 'Email Verified ✅',
-  message: 'Your email has been verified successfully. You can now deposit funds into your Trebetta wallet.',
-  type: 'security',
-  severity: 'success',
-  metadata: {
-    action: 'verify_email'
-  }
-});
 
-      return res.json({ success: true, message: 'Email verified successfully.' });
+      await conn.execute(
+        'UPDATE users SET is_email_verified = 1, updated_at = NOW() WHERE id = ?',
+        [userId]
+      );
+
+      await conn.execute(
+        'UPDATE verification_tokens SET used = 1 WHERE id = ?',
+        [rec.id]
+      );
+
+      await auditLog(
+        null,
+        userId,
+        'VERIFY_EMAIL',
+        'user',
+        userId,
+        { via: 'token' }
+      );
+
+      await conn.commit();
     } catch (e) {
       await conn.rollback();
       throw e;
     } finally {
       conn.release();
     }
+
+    // 🔔 Fetch user email AFTER commit (SAFE)
+    try {
+      const [[user]] = await pool.query(
+        'SELECT email FROM users WHERE id = ? LIMIT 1',
+        [userId]
+      );
+
+      if (user?.email) {
+        await notify({
+          userId,
+          email: user.email,
+          title: 'Email Verified ✅',
+          message:
+            'Your email has been verified successfully. You can now deposit funds into your Trebetta wallet.',
+          type: 'security',
+          severity: 'success',
+          metadata: { action: 'verify_email' }
+        });
+      }
+    } catch (nErr) {
+      console.warn('verifyEmail notify failed:', nErr.message);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Email verified successfully.'
+    });
   } catch (err) {
-    console.error('verifyEmail err', err);
-    return res.status(500).json({ success: false, message: 'Server error', error: err.message });
+    console.error('verifyEmail err:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
   }
 };
+
 // ---------------------
 // Login
 // ---------------------
