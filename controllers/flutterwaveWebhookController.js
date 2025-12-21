@@ -13,27 +13,52 @@ const { FLW_SECRET_HASH } = process.env;
  * ---------------------------------------------------------
  */
 async function flutterwaveWebhook(req, res) {
-  const rawBody = req.body;
   const signature = req.headers['verif-hash'];
 
   console.log('[FLW][WEBHOOK] received');
 
   try {
+    // -------------------------------------------------
+    // Verify signature
+    // -------------------------------------------------
     if (!signature || signature !== FLW_SECRET_HASH) {
       console.warn('[FLW][WEBHOOK] invalid signature');
       return res.status(403).send('Invalid signature');
     }
 
-    const payload = JSON.parse(rawBody.toString('utf8'));
-    console.log('[FLW][WEBHOOK] payload:', payload.event);
+    // -------------------------------------------------
+    // SAFELY PARSE PAYLOAD (BUFFER OR OBJECT)
+    // -------------------------------------------------
+    let payload;
+    try {
+      if (Buffer.isBuffer(req.body)) {
+        payload = JSON.parse(req.body.toString('utf8'));
+      } else {
+        payload = req.body;
+      }
+    } catch (e) {
+      console.error('[FLW][WEBHOOK] payload parse failed', e.message);
+      return res.send('ok');
+    }
 
+    console.log('[FLW][WEBHOOK] event:', payload?.event);
+
+    // -------------------------------------------------
+    // Only handle successful charges
+    // -------------------------------------------------
     if (payload.event !== 'charge.completed') {
       return res.send('ok');
     }
 
     const txRef = payload.data?.tx_ref;
-    if (!txRef) return res.send('ok');
+    if (!txRef) {
+      console.warn('[FLW][WEBHOOK] missing tx_ref');
+      return res.send('ok');
+    }
 
+    // -------------------------------------------------
+    // Idempotency check
+    // -------------------------------------------------
     const { inserted } = await tryInsertWebhook(
       'flutterwave',
       txRef,
@@ -43,20 +68,31 @@ async function flutterwaveWebhook(req, res) {
     );
 
     if (!inserted) {
-      console.log('[FLW][WEBHOOK] duplicate:', txRef);
+      console.log('[FLW][WEBHOOK] duplicate ignored:', txRef);
       return res.send('ok');
     }
 
+    // -------------------------------------------------
+    // Load transaction
+    // -------------------------------------------------
     const [[tx]] = await pool.query(
-      `SELECT * FROM transactions WHERE reference = ? LIMIT 1`,
+      'SELECT * FROM transactions WHERE reference = ? LIMIT 1',
       [txRef]
     );
 
-    if (!tx || tx.status === 'completed') {
-      console.log('[FLW][WEBHOOK] already handled');
+    if (!tx) {
+      console.warn('[FLW][WEBHOOK] transaction not found:', txRef);
       return res.send('ok');
     }
 
+    if (tx.status === 'completed') {
+      console.log('[FLW][WEBHOOK] already completed:', txRef);
+      return res.send('ok');
+    }
+
+    // -------------------------------------------------
+    // CREDIT WALLET (TRANSACTIONAL)
+    // -------------------------------------------------
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
@@ -81,7 +117,9 @@ async function flutterwaveWebhook(req, res) {
         [JSON.stringify(payload), tx.id]
       );
 
-      // slip
+      // -------------------------------------------------
+      // Deposit slip (best-effort)
+      // -------------------------------------------------
       try {
         await slipService.createSlip(tx.user_id, 'deposit', {
           amount: Number(tx.amount),
@@ -90,7 +128,7 @@ async function flutterwaveWebhook(req, res) {
           created_at: new Date().toISOString()
         });
       } catch (e) {
-        console.warn('[FLW][WEBHOOK] slip failed', e.message);
+        console.warn('[FLW][WEBHOOK] slip failed:', e.message);
       }
 
       await auditLog(
@@ -104,7 +142,9 @@ async function flutterwaveWebhook(req, res) {
 
       await conn.commit();
 
-      // notify (post commit)
+      // -------------------------------------------------
+      // Notify user (post-commit)
+      // -------------------------------------------------
       try {
         const [[user]] = await pool.query(
           'SELECT email FROM users WHERE id = ? LIMIT 1',
@@ -121,7 +161,7 @@ async function flutterwaveWebhook(req, res) {
             severity: 'success'
           });
         }
-      } catch (nErr) {
+      } catch {
         console.warn('[FLW][WEBHOOK] notify failed');
       }
 

@@ -115,25 +115,32 @@ async function getSettingsCached() {
 /** ------------------------------------------------------------------
  * Update settings
  * ------------------------------------------------------------------ */
+/** ------------------------------------------------------------------
+ * Update settings (ADMIN)
+ * ------------------------------------------------------------------ */
 async function updateSettings(payload, adminId = null) {
   await ensureSettingsRow();
 
+  // always read fresh DB values
   const current = await getSettingsFromDb();
 
   // simple fields
   const minDeposit = Number(payload.min_deposit ?? current.min_deposit);
   const minWithdraw = Number(payload.min_withdraw ?? current.min_withdraw);
-  const cutPercent = Number(payload.company_cut_percent ?? current.company_cut_percent);
+  const cutPercent = Number(
+    payload.company_cut_percent ?? current.company_cut_percent
+  );
 
   // boolean handling
   const rollRaw =
     payload.rollover_enabled !== undefined
       ? payload.rollover_enabled
       : current.rollover_enabled;
+
   const rolloverEnabled =
     rollRaw === true || rollRaw === 'true' || rollRaw === 1 ? 1 : 0;
 
-  // NEW: Withdraw Fee Rules (JSON)
+  // Withdraw Fee Rules (JSON)
   let withdrawFeeRules = current.withdraw_fee_rules;
 
   if (payload.withdraw_fee_rules !== undefined) {
@@ -142,7 +149,6 @@ async function updateSettings(payload, adminId = null) {
         ? payload.withdraw_fee_rules
         : JSON.parse(payload.withdraw_fee_rules);
 
-      // Validate rule structure
       for (const r of rules) {
         if (
           typeof r.min !== 'number' ||
@@ -152,31 +158,35 @@ async function updateSettings(payload, adminId = null) {
           throw new Error('Invalid withdraw_fee_rules format');
         }
       }
+
       withdrawFeeRules = rules;
     } catch (err) {
-      throw new Error('withdraw_fee_rules must be valid JSON array');
+      throw new Error('withdraw_fee_rules must be a valid JSON array');
     }
   }
 
   // validations
   if (minDeposit < 0) throw new Error('Invalid min_deposit');
   if (minWithdraw < 0) throw new Error('Invalid min_withdraw');
-  if (cutPercent < 0 || cutPercent > 100)
+  if (cutPercent < 0 || cutPercent > 100) {
     throw new Error('Invalid company_cut_percent');
+  }
 
+  // get settings row id
   const [[{ id }]] = await pool.query(
     'SELECT id FROM system_settings ORDER BY id ASC LIMIT 1'
   );
 
+  // update DB
   await pool.query(
     `UPDATE system_settings
-      SET min_deposit = ?, 
-          min_withdraw = ?, 
-          company_cut_percent = ?, 
-          rollover_enabled = ?,
-          withdraw_fee_rules = ?,
-          updated_at = NOW()
-      WHERE id = ?`,
+     SET min_deposit = ?,
+         min_withdraw = ?,
+         company_cut_percent = ?,
+         rollover_enabled = ?,
+         withdraw_fee_rules = ?,
+         updated_at = NOW()
+     WHERE id = ?`,
     [
       minDeposit,
       minWithdraw,
@@ -187,20 +197,21 @@ async function updateSettings(payload, adminId = null) {
     ]
   );
 
-  const updated = await getSettingsFromDb();
-
-  // update cache
+  // 🔥 CRITICAL FIX: invalidate cache instead of resetting it
   try {
-    await cache.set(
-      SETTINGS_CACHE_KEY,
-      JSON.stringify(updated),
-      SETTINGS_CACHE_TTL
-    );
+    await cache.del(SETTINGS_CACHE_KEY);
+    console.log('settingsService.updateSettings › cache invalidated');
   } catch (e) {
-    logger.warn('settingsService.updateSettings › cache.set error', e);
+    logger.warn('settingsService.updateSettings › cache.del error', e);
   }
 
-  return { before: current, after: updated };
+  // return fresh values
+  const updated = await getSettingsFromDb();
+
+  return {
+    before: current,
+    after: updated
+  };
 }
 
 /** ------------------------------------------------------------------
