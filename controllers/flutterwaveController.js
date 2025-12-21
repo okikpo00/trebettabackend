@@ -77,12 +77,14 @@ async function initiateFlutterwaveDeposit(req, res) {
     // -------------------------------------------------
     // Create pending transaction (DO NOT credit wallet)
     // -------------------------------------------------
-    await pool.query(
-      `INSERT INTO transactions
-        (wallet_id, user_id, type, amount, gateway, status, reference, created_at)
-       VALUES (?, ?, 'deposit', ?, 'flutterwave', 'pending', ?, NOW())`,
-      [wallet.id, userId, parsedAmount, reference]
-    );
+ const [txResult] = await pool.query(
+  `INSERT INTO transactions
+    (wallet_id, user_id, type, amount, gateway, status, reference, created_at)
+   VALUES (?, ?, 'deposit', ?, 'flutterwave', 'pending', ?, NOW())`,
+  [wallet.id, userId, parsedAmount, reference]
+);
+
+const transactionId = txResult.insertId;
 
     console.log('[FLW][INIT] transaction created:', reference);
 
@@ -135,14 +137,17 @@ async function initiateFlutterwaveDeposit(req, res) {
     // Audit log (non-blocking)
     // -------------------------------------------------
     try {
-      await auditLog(
-        null,
-        userId,
-        'FLW_DEPOSIT_INITIATED',
-        'transactions',
-        reference,
-        { amount: parsedAmount }
-      );
+await auditLog(
+  null,
+  userId,
+  'FLW_DEPOSIT_INITIATED',
+  'transactions',
+  transactionId, // ✅ INTEGER (correct)
+  {
+    amount: parsedAmount,
+    reference
+  }
+);
     } catch (e) {
       console.warn('[FLW][INIT] auditLog failed', e.message);
     }
