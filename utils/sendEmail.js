@@ -1,46 +1,11 @@
-const nodemailer = require('nodemailer');
+// utils/sendEmail.js
+const axios = require('axios');
 
-let transporter = null;
-
-/**
- * ---------------------------------------------------------
- * Get SMTP transporter (lazy init, production-safe)
- * ---------------------------------------------------------
- */
-function getTransporter() {
-  // Reuse existing transporter if already created
-  if (transporter) return transporter;
-
-  const host = process.env.MAIL_HOST;
-  const port = Number(process.env.MAIL_PORT);
-  const user = process.env.MAIL_USER;
-  const pass = process.env.MAIL_PASS;
-
-  // Validate env configuration at runtime
-  if (!host || !port || !user || !pass) {
-    console.warn('⚠️ Email not configured properly (MAIL_* env missing)');
-    return null;
-  }
-
-  transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465, // true only for 465, false for 587 (Brevo)
-    auth: {
-      user,
-      pass
-    },
-    pool: true,          // production-safe pooling
-    maxConnections: 5,
-    maxMessages: 100
-  });
-
-  return transporter;
-}
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
 /**
  * ---------------------------------------------------------
- * SEND EMAIL (Transactional)
+ * SEND EMAIL (Brevo HTTP API – Production Safe)
  *
  * @param {string} to      Recipient email
  * @param {string} subject Email subject
@@ -55,29 +20,42 @@ async function sendEmail(to, subject, html, text = '') {
       return;
     }
 
-    const mailer = getTransporter();
-    if (!mailer) return; // Email not configured, fail silently
+    if (!process.env.BREVO_API_KEY) {
+      console.warn('⚠️ BREVO_API_KEY missing — email skipped');
+      return;
+    }
 
-    const from =
-      process.env.MAIL_FROM ||
-      `Trebetta <${process.env.MAIL_USER}>`;
+    const fromEmail =
+      process.env.MAIL_FROM || 'Trebetta <no-reply@trebetta.com>';
 
-    const mailOptions = {
-      from,
-      to,
+    const payload = {
+      sender: {
+        email: fromEmail.includes('<')
+          ? fromEmail.match(/<(.*)>/)[1]
+          : fromEmail,
+        name: fromEmail.split('<')[0]?.trim() || 'Trebetta'
+      },
+      to: [{ email: to }],
       subject,
-      html,
-      text: text || html.replace(/<[^>]+>/g, '') // auto text fallback
+      htmlContent: html,
+      textContent: text || html.replace(/<[^>]+>/g, '')
     };
 
-    const info = await mailer.sendMail(mailOptions);
+    const res = await axios.post(BREVO_API_URL, payload, {
+      headers: {
+        'api-key': process.env.BREVO_API_KEY,
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      },
+      timeout: 10000 // never hang your API
+    });
 
-    console.log(`📧 Email sent → ${to} (${info.messageId})`);
+    console.log('📧 Email sent →', to, 'Brevo ID:', res.data?.messageId);
   } catch (err) {
     console.error('❌ Email send failed:', {
       to,
       subject,
-      error: err.message
+      error: err?.response?.data || err.message
     });
   }
 }
