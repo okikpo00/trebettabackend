@@ -97,18 +97,37 @@ async function flutterwaveWebhook(req, res) {
     try {
       await conn.beginTransaction();
 
-      await walletService.creditUserWallet(
-        conn,
-        tx.user_id,
-        tx.amount,
-        'deposit',
-        {
-          type: 'deposit',
-          gateway: 'flutterwave',
-          reference: tx.reference,
-          description: 'Flutterwave wallet deposit'
-        }
-      );
+    // 1️⃣ Lock wallet
+const [[wallet]] = await conn.query(
+  'SELECT id, balance FROM wallets WHERE user_id = ? FOR UPDATE',
+  [tx.user_id]
+);
+
+if (!wallet) {
+  throw new Error('Wallet not found');
+}
+
+const before = Number(wallet.balance);
+const amount = Number(tx.amount);
+const after = Number((before + amount).toFixed(2));
+
+// 2️⃣ Update wallet balance
+await conn.query(
+  'UPDATE wallets SET balance = ? WHERE id = ?',
+  [after, wallet.id]
+);
+
+// 3️⃣ Update EXISTING transaction (no insert!)
+await conn.query(
+  `UPDATE transactions
+   SET status = 'completed',
+       balance_before = ?,
+       balance_after = ?,
+       metadata = ?
+   WHERE id = ?`,
+  [before, after, JSON.stringify(payload), tx.id]
+);
+
 
       await conn.query(
         `UPDATE transactions
